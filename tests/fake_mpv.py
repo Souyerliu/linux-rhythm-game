@@ -30,6 +30,8 @@ for line in stream:
     data = None
     if args[:2] == ['get_property', 'time-pos']:
         data = position + float(os.environ.get('TEST_MPV_POSITION_BIAS', '0'))
+    elif args[:2] == ['get_property', 'duration']:
+        data = float(os.environ['TEST_MPV_DURATION']) if 'TEST_MPV_DURATION' in os.environ else None
     elif args[:2] == ['get_property', 'audio-pts']:
         data = position
         spike_at = float(os.environ.get('TEST_MPV_PTS_SPIKE_AT', '-1'))

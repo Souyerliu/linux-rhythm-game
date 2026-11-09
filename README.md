@@ -15,9 +15,12 @@ Bash 实现游戏和谱面编辑器，支持四轨单点、简单双押、首尾
 sudo apt install mpv python3
 ```
 
-可直接进入无音乐练习模式，或使用自己的谱面：
+直接运行 `./game.sh` 进入选歌与难度主界面，也可使用自己的谱面：
 
 ```bash
+# 主界面：扫描 songs/ 下的 MIDI 歌曲
+./game.sh
+
 # 音乐谱面模式（请先准备自己的谱面和音频）
 ./game.sh songs/my-song/chart.csv
 
@@ -25,16 +28,50 @@ sudo apt install mpv python3
 ./editor.sh songs/my-song/chart.csv
 
 # 无音乐练习 / 静音试玩指定谱面
-./game.sh
+./game.sh --practice
 ./game.sh songs/my-song/chart.csv --silent
 
 # 游戏默认目标为 60 FPS，可按终端性能调整（15～120）
-./game.sh --fps 60
-./game.sh --fps 30
+./game.sh --practice --fps 60
+./game.sh --practice --fps 30
+```
+
+### 选歌、难度与最高分
+
+把 `.mid` / `.midi` 文件放进 `songs/` 或其子目录，重新打开主界面即可选歌。
+**W/S 或上下方向键**选歌，**A/D 或左右方向键**选难度，**H** 切换长条，
+**Enter** 开始，**P** 进入无音乐练习，**Q** 退出主界面。歌曲较多时自动翻页。
+默认选择半拍难度并开启长条，每次开始生成随机种子的谱面。结算或中途退出后，按任意键返回选歌。
+
+| 难度 | 最小 grid | 独立最高分 |
+| --- | --- | --- |
+| Easy | `1`，整拍 | 一条 |
+| Normal | `1/2`，半拍 | 一条 |
+| Hard | `1/4`，四分之一拍 | 一条 |
+
+主界面显示所选歌曲三档最高分，游戏中显示当前难度的历史最高分。
+**完整打完**后才保存成绩，超过历史最高分时结算显示 `NEW BEST!`；中途退出、Ctrl+C 或播放失败不保存。
+记录按 **MIDI 文件内容的 SHA-256 + 所选最小 grid** 区分，种子、选轨和长条开关不额外分榜，
+静音完整游玩也会记分。同一 MIDI 改名或移动目录不会丢失记录，内容改变后视为另一首歌曲。
+不同模式的音符总数可能不同，排行榜比较的是原始分数。
+
+本地记录存放在项目的 `.local/scores/`，不会提交到 Git，也不随音频缓存清理而删除。
+可用环境变量 `RHYTHM_SCORE_DIR` 指定其他目录。记录采用文件锁和原子替换，多个游戏同时结束也会保留较高分。
+从 `random-play.sh` 或 `game.sh chart.csv` 启动同样会记录：谱面的音频须指向 MIDI，
+难度优先读取 `# rhythm_grid=`；没有该头部的旧谱面按音符起点推断最细网格，
+含非整拍、半拍、四分之一拍起点的旧谱面不加入这三档记录。编辑并保存谱面会保留已有 grid 头部。
+
+```bash
+# 固定随机种子 / 使用其他 MIDI 目录 / 调整主界面启动的游戏参数
+./game.sh --menu --seed 42
+./menu.sh --songs /path/to/midi --fps 30 --offset 50
+./menu.sh --silent
 ```
 
 游戏用 **D / F / J / K** 击打四条轨道，音符到达底部虚线时按键。**Q / Esc** 退出。
 结束后显示分数、最大连击及判定统计。正常退出、Ctrl+C 或终止信号会停止播放器并恢复终端。
+有音乐时，结束时间同时覆盖最后一个音符的判定时间和完整音频时长，尾奏播放结束后再结算；
+自动选中的旋律轨道提前结束时，尾奏可能没有下落音符，但音乐会继续播放。静音模式仍按谱面长度结束。
 
 | 判定 | 时间误差 | 分数 |
 | --- | --- | --- |
@@ -110,8 +147,17 @@ sudo apt install mpv python3
 长条尾部也向下收束到允许的网格位置，不会超过原 MIDI 持续时间和后续音符间距限制。
 前奏和尾奏的辅助低音仍保持稀疏取样。更细网格通常更难，建议先尝试 `--grid 1/2`。
 Swan song 种子 42（严格网格 v2）：一拍版 282 个头部，半拍版 539 个，四分之一拍版 856 个。
-每种网格使用独立生成文件名，Shell 版本使用 `balanced-shell-v3` / `balanced-holds-shell-v3`，已有谱面不会被覆盖或自动更改。
+每种网格使用独立生成文件名，Shell 版本使用 `balanced-shell-v4` / `balanced-holds-shell-v4`，已有谱面不会被覆盖或自动更改。
 要应用新规则，请重新执行随机生成命令；直接游玩旧 CSV 仍会显示旧谱面的全部拍位置。
+
+v4 对自动选轨的简单模式（`grid 1`）增加稀疏段补点：基础谱面平均低于 1.5 个音符/秒，
+且存在独立的 Piano 轨时，从该轨的真实整拍起音补点，优先拆分较长的空白，目标约 1.75 个音符/秒。
+保留全部原有头部，继续遵守 300 ms 最短间隔；可用起音不足时不强行凑数。
+补点与随机种子无关，手动指定 `--track` / `--support-track` 时使用原选轨规则。
+半拍、四分之一拍模式保持原有抽取规则。
+Petrichor 简单模式由 166 个头部增加到 **288 个**，约 **1.75 个/秒**，接近 Swan song 的 282 个、约 1.76 个/秒；
+最长头部空白从 15.46 秒缩短到 4.42 秒。开启长条时，288 个头部中有 3 根长条。
+主界面自动使用 v4；命令行可运行 `./random-play.sh songs/Petrichor.mid --seed 42 --grid 1 --holds`。
 
 使用 `--holds` 后，生成器读取 MIDI note-off（含零力度 note-on）确定持续时间，
 从同一起音处的持续音中选择长条。保持头部数量与起音时间不变，长条只替换部分单点：
@@ -137,7 +183,7 @@ Swan song 种子 42（严格网格 v2）：一拍版 282 个头部，半拍版 5
 通过 `--output songs/mysong/random.csv` 可另选保存位置。
 背景音乐继续复用 MIDI 的合成缓存，每次随机不会重新合成。
 
-旧版生成的谱面仍可直接游玩。Shell 版本使用独立的 32 位随机算法，同一种子在新版本中可复现，但与旧 Python 版本的轨道排列不同；固定种子命令会按 v3 文件名另存谱面。
+旧版生成的谱面仍可直接游玩。Shell 版本使用独立的 32 位随机算法，同一种子在新版本中可复现，但与旧 Python 版本的轨道排列不同；固定种子命令会按 v4 文件名另存谱面。
 
 ### MIDI 背景音乐和简单谱面导入
 
@@ -348,11 +394,12 @@ Ctrl+C 直接退出，不会自动保存。
 ## 开发和验证
 
 ```bash
-bash -n game.sh editor.sh random-play.sh tools/midi_import.sh tools/random_midi.sh lib/chart.sh lib/timing.sh lib/terminal.sh lib/game_clock.sh
+bash -n game.sh menu.sh editor.sh random-play.sh tools/midi_import.sh tools/random_midi.sh lib/chart.sh lib/timing.sh lib/terminal.sh lib/game_clock.sh lib/scores.sh
 python3 tests/test_game.py
 python3 tests/test_midi.py
 python3 tests/test_holds.py
 python3 tests/test_clock.py
+python3 tests/test_scores.py
 ```
 
 测试包含谱面校验与排序、编辑保存、移动冲突、判定边界、终端键盘交互、未保存提示、
@@ -363,5 +410,3 @@ python3 tests/test_clock.py
 测试使用临时静音 WAV 和测试谱面，根据独立查询的音频时钟对前 10 个音符自动输入，检查没有 Miss。静音输出测试不验证实际声卡或耳机的延迟。
 IPC 测试使用模拟播放器，需要系统允许本机 Unix socket；
 这些测试不替代真实音频设备上的试听。
-
- 

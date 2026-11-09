@@ -77,6 +77,54 @@ function random_index(n) { state=(state*1664525+1013904223)%4294967296; return i
 function shuffle(a,    i,j,temp) {
     for(i=4;i>1;i--) { j=1+random_index(i); temp=a[i]; a[i]=a[j]; a[j]=temp }
 }
+# Sparse easy melodies can leave whole phrases empty while piano continues.
+# Keep every original head, then split the widest gaps with real piano onsets.
+# This is independent of the random seed and never quantizes off-grid notes.
+function fill_easy_piano(    n,t,tick,ms,i,k,size,target,left,right,distance,best,best_distance,count) {
+    fill_track=-1; fill_added=0
+    if(!random_mode || subdivisions!=1 || ENVIRON["MIDI_TRACK"]!="" || ENVIRON["MIDI_SUPPORT"]!="") return
+    if(total*1000 >= milliseconds(end_tick)*1.5) return
+    for(n=1;n<=note_count;n++) if(nt[n]!=track && nt[n]!=support && nc[n]!=9 && tolower(names[nt[n]]) ~ /piano/ && ticks[n]%division==0) {
+        ms=milliseconds(ticks[n])
+        if(ms>=2000) piano_counts[nt[n]]++
+    }
+    for(t=0;t<track_count;t++) if(piano_counts[t] && (fill_track<0 || piano_counts[t]>piano_counts[fill_track])) fill_track=t
+    if(fill_track<0) return
+    for(i=1;i<=total;i++) fill_kept[times[i]]=1
+    for(n=1;n<=note_count;n++) if(nt[n]==fill_track && nc[n]!=9 && ticks[n]%division==0) {
+        ms=milliseconds(ticks[n]); k=piano_notes[ms]
+        if(ms>=2000 && (!k || pitches[n]>pitches[k])) piano_notes[ms]=n
+    }
+    for(ms in fill_kept) fill_union[ms]=1
+    for(ms in piano_notes) fill_union[ms]=1
+    for(ms in fill_union) fill_times[++size]=ms+0
+    sort(fill_times,1,size)
+    target=int(milliseconds(end_tick)*1.75/1000)
+    count=total
+    while(count<target) {
+        right=milliseconds(end_tick)
+        for(i=size;i>=1;i--) {
+            ms=fill_times[i]
+            if(ms in fill_kept) right=ms
+            fill_right[i]=right
+        }
+        left=2000-minimum_gap; best=0; best_distance=-1
+        for(i=1;i<=size;i++) {
+            ms=fill_times[i]
+            if(ms in fill_kept) { left=ms; continue }
+            distance=min(ms-left,fill_right[i]-ms)
+            if(distance>=minimum_gap && distance>best_distance) { best=i; best_distance=distance }
+        }
+        if(!best) break
+        fill_kept[fill_times[best]]=1; fill_added++; count++
+    }
+    if(!fill_added) { fill_track=-1; return }
+    # Lane balance is assigned after hold construction for random charts.
+    total=0
+    for(i=1;i<=size;i++) if(fill_times[i] in fill_kept) {
+        times[++total]=fill_times[i]; lanes[total]=0
+    }
+}
 {
     for(field=1;field<=NF;field++) bytes[++size]=$field+0
 }
@@ -185,8 +233,9 @@ END {
         times[++total]=ms; lanes[total]=lane; last_lane=lane
     }
     if(!total) fail("Selected track has no usable notes")
+    fill_easy_piano()
     if(ENVIRON["MIDI_HOLDS"]+0) {
-        for(n=1;n<=note_count;n++) if((nt[n]==track || (support!="" && nt[n]==support)) && nc[n]!=9 && ends[n]>ticks[n]) {
+        for(n=1;n<=note_count;n++) if((nt[n]==track || (support!="" && nt[n]==support) || nt[n]==fill_track) && nc[n]!=9 && ends[n]>ticks[n]) {
             ms=milliseconds(ticks[n]); end=milliseconds(ends[n]); old=sources[ms]
             if(!old || end>milliseconds(ends[old])) sources[ms]=n
         }
@@ -235,6 +284,10 @@ END {
         print "# random_mode=" ENVIRON["MIDI_MODE"]
         print "# melody_track=" track
         print "# support_track=" (support==""?"None":support)
+        if(fill_added) {
+            print "# density_fill_track=" fill_track
+            print "# density_added=" fill_added
+        }
         if(ENVIRON["MIDI_HOLDS"]+0) print "# hold_count=" (hold_count+0)
         print "# rhythm_grid=" ENVIRON["MIDI_GRID"]
     }

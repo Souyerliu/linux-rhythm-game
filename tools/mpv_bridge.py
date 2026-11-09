@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Line-oriented mpv IPC adapter; stdout is reserved for responses to Bash."""
 import json
+import math
 import os
 import signal
 import socket
@@ -72,7 +73,14 @@ def main():
                         if time.monotonic() > deadline:
                             raise RuntimeError('audio failed to load (check file and audio device)')
                         time.sleep(.03)
-                print('READY', flush=True)
+                try:
+                    duration = command('get_property', 'duration')
+                except RuntimeError:
+                    duration = None
+                duration_ms = (round(duration * 1000)
+                               if isinstance(duration, (int, float)) and math.isfinite(duration) and duration > 0
+                               else 0)
+                print(f'READY {duration_ms}', flush=True)
                 for line in sys.stdin:
                     parts = line.split()
                     if not parts:

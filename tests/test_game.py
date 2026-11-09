@@ -103,7 +103,7 @@ class GameTests(unittest.TestCase):
 
     def test_game_uses_terminal_height(self):
         for rows in (28,48):
-            data = self.terminal(['bash','game.sh'],[(.15,b'q')],size=(rows,90))
+            data = self.terminal(['bash','game.sh','--practice'],[(.15,b'q')],size=(rows,90))
             frame = data.split(b'\x1b[H')[1]
             self.assertEqual(sum(line.startswith(b'          |') for line in frame.splitlines()),rows-10)
 
@@ -253,6 +253,23 @@ render
                                  [(at_note, b'df')], env)
             self.assertIn(b'Miss: 0', data)
             self.assertIn(b'Max combo: 2 / 2', data)
+
+    def test_audio_reply_can_arrive_in_fragments(self):
+        result = bash('''source ./game.sh
+clock_ms
+stamp=$now_ms
+exec {audio_out}< <(printf 'OK 12'; sleep .05; printf '3 0 %s' "$stamp"; sleep .05; printf '\\n')
+sync_pending=1 sync_requested_ms=$now_ms runtime=0 next_sync=10000 audio_eof=0
+sync_response_buffer=''
+game_clock_init 0 "$stamp" "$stamp"
+for ((attempt=0; attempt<100 && sync_pending; attempt++)); do
+    clock_ms
+    poll_game_audio || exit 1
+    sleep .005
+done
+[[ $sync_pending == 0 && $audio_ms == 123 && $audio_sample_ms == "$stamp" && -z $sync_response_buffer ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_frame_deadlines_do_not_drift_or_burst(self):
         result = bash('''source ./game.sh
@@ -464,7 +481,7 @@ elapsed=1141; expire_notes
             self.assertEqual(chart.read_text(), original)
 
     def test_practice_interrupt(self):
-        self.terminal(['bash', 'game.sh'], [(.15, signal.SIGINT)], expected=130)
+        self.terminal(['bash', 'game.sh', '--practice'], [(.15, signal.SIGINT)], expected=130)
 
     def test_silent_chart_completion(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -492,6 +509,37 @@ elapsed=1141; expire_notes
                                  [(.2, b' '), (.5, b' '), (.7, b'eq')], env)
             self.assertIn(b'Preview paused', data)
             with self.assertRaises(ProcessLookupError): os.kill(int(pidfile.read_text()), 0)
+
+    def test_audio_outro_finishes_after_the_last_chart_note(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            executable = directory / 'mpv'
+            shutil.copy(ROOT / 'tests/fake_mpv.py', executable)
+            executable.chmod(0o755)
+            chart = directory / 'chart.csv'
+            chart.write_text('100,0\n')
+            play_time = directory / 'play-time'
+            env = {'PATH': str(directory) + ':' + os.environ['PATH'],
+                   'TEST_MPV_DURATION': '2.4', 'TEST_MPV_PLAY_TIME': str(play_time)}
+            data = self.terminal(['bash', 'game.sh', str(chart), '--audio', str(self.audio)], [], env)
+            self.assertGreaterEqual(time.monotonic() - float(play_time.read_text()), 2.4)
+            self.assertIn(b'CHART complete', data)
+            self.assertIn(b'Miss: 1', data)
+
+    def test_audio_duration_respects_offset_and_never_truncates_chart(self):
+        result = bash('''source ./game.sh
+for chart_offset in -200 0 300; do
+    end_ms=1300
+    extend_playback_end 0
+    [[ $end_ms == 1300 ]] || exit 3
+    extend_playback_end 2400
+    [[ $end_ms == $((2400 - chart_offset)) ]] || exit 1
+    end_ms=5000
+    extend_playback_end 2400
+    [[ $end_ms == 5000 ]] || exit 2
+done
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == '__main__':

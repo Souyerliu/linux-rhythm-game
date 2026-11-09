@@ -4,6 +4,7 @@ GAME_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$GAME_ROOT/lib/chart.sh"
 source "$GAME_ROOT/lib/terminal.sh"
 source "$GAME_ROOT/lib/game_clock.sh"
+source "$GAME_ROOT/lib/scores.sh"
 
 if (( BASH_VERSINFO[0] < 5 )); then
     printf 'Please run this game with Bash 5 or newer.\n' >&2
@@ -116,15 +117,28 @@ paint_game_cell() {
 # Game-time synchronization must never wait for mpv on the input path.
 # Only one request is outstanding; editor commands retain their synchronous API.
 poll_game_audio() {
-    local response
+    local response='' read_status
     if ((sync_pending)); then
         if IFS= read -r -t 0 <&"$audio_out"; then
-            IFS= read -r -t 0.001 response <&"$audio_out" || { chart_error 'Audio disconnected'; return 1; }
-            parse_audio_response "$response" || return 1
-            clock_ms
-            game_clock_sample "$audio_ms" "$audio_sample_ms" "$now_ms"
-            sync_pending=0
-        elif ((now_ms - sync_requested_ms > 3000)); then
+            # Readiness promises bytes, not a complete line. A timed-out read
+            # consumes its partial result, so preserve it for the next poll.
+            if IFS= read -r -t 0.001 response <&"$audio_out"; then
+                response=${sync_response_buffer:-}$response
+                sync_response_buffer=''
+                parse_audio_response "$response" || return 1
+                clock_ms
+                game_clock_sample "$audio_ms" "$audio_sample_ms" "$now_ms"
+                sync_pending=0
+            else
+                read_status=$?
+                if ((read_status > 128)); then
+                    sync_response_buffer+=$response
+                else
+                    chart_error 'Audio disconnected'; return 1
+                fi
+            fi
+        fi
+        if ((sync_pending && now_ms - sync_requested_ms > 3000)); then
             chart_error 'Audio synchronization timed out'; return 1
         fi
     fi
@@ -166,7 +180,9 @@ render() {
             paint_game_cell "$y" "${note_lanes[i]}" '[===]' "$code" 3
         fi
     done
-    printf -v frame '  FOUR KEYS - %s\n  Beat:white Half:cyan Quarter:yellow Other:purple\n  SCORE %06d     COMBO %03d     BEST %03d\n\n' "${mode_label:-PRACTICE}" "$score" "$combo" "$max_combo"
+    local title=${mode_label:-PRACTICE}
+    [[ -z ${score_grid:-} ]] || title+=" | GRID $score_grid | HIGH $best_score"
+    printf -v frame '  FOUR KEYS - %s\n  Beat:white Half:cyan Quarter:yellow Other:purple\n  SCORE %06d     COMBO %03d     BEST %03d\n\n' "$title" "$score" "$combo" "$max_combo"
     frame+='          +-----+-----+-----+-----+'
     frame+=$'\n'
     for ((row=0; row<=height; row++)); do
@@ -206,13 +222,27 @@ cleanup() {
     fi
 }
 
+extend_playback_end() {
+    # Chart time is media time minus offset. Keep both the last note's
+    # judgment window and the audio's full outro, including reverb release.
+    (($1 > 0)) || return 0
+    local media_end=$(($1 - chart_offset))
+    ((media_end > end_ms)) && end_ms=$media_end
+    return 0
+}
+
 main() {
+    if (($# == 0)) || [[ ${1:-} == --menu ]]; then
+        [[ ${1:-} != --menu ]] || shift
+        bash "$GAME_ROOT/menu.sh" "$@"
+        return $?
+    fi
     local file='' audio_override='' offset_override='' silent=0
     local render_fps=60
     while (($#)); do
     case $1 in
         -h|--help)
-            printf 'Usage: ./game.sh [chart.csv] [--audio FILE] [--offset MS] [--fps 15-120] [--silent]\nDefault: 60 FPS; playfield expands to terminal height at startup.\nWithout a chart: built-in practice. Music requires mpv + python3.\nD F J K: hit; Q / Esc: quit. Positive offset delays notes.\n'
+            printf 'Usage: ./game.sh [--menu | --practice | chart.csv] [--audio FILE] [--offset MS] [--fps 15-120] [--silent]\nNo arguments: song and difficulty menu. --practice: built-in practice.\nDefault: 60 FPS; playfield expands to terminal height at startup.\nMusic and high scores require python3; music also requires mpv.\nD F J K: hit; Q / Esc: quit. Positive offset delays notes.\n'
             return 0 ;;
         --audio|--offset|--fps)
             (($# >= 2)) || { chart_error "Missing value for $1"; return 1; }
@@ -226,6 +256,7 @@ main() {
             esac
             shift ;;
         --silent) silent=1 ;;
+        --practice) ;;
         -*) chart_error "Unknown option: $1"; return 1 ;;
         *) [[ -z $file ]] || { chart_error 'Only one chart may be supplied'; return 1; }; file=$1 ;;
     esac
@@ -240,6 +271,7 @@ main() {
         chart_offset=0 audio_path='' mode_label=PRACTICE
     fi
     [[ -z $audio_override ]] || audio_path=$audio_override
+    prepare_score_context "$audio_path"
     if [[ -n $offset_override ]]; then
         [[ $offset_override =~ ^-?[0-9]{1,7}$ ]] || { chart_error 'Offset must be an integer in milliseconds'; return 1; }
         if [[ $offset_override == -* ]]; then chart_offset=$((-10#${offset_override#-})); else chart_offset=$((10#$offset_override)); fi
@@ -268,13 +300,14 @@ main() {
     trap 'exit 143' TERM HUP
     if [[ -n $audio_path ]]; then
         start_audio || return 1
+        extend_playback_end "$audio_duration_ms"
     fi
     stty -echo -icanon min 0 time 0 -ixon
     printf '\e[?1049h\e[?25l\e[2J'
     # Prepare input and the first screen before releasing the paused player.
     render
     if [[ -n ${audio_pid:-} ]]; then audio_command play || return 1; fi
-    local start_ms next_frame=0 key quit=0 next_sync=0 runtime sync_pending=0 sync_requested_ms=0 wait_ms input_timeout
+    local start_ms next_frame=0 key quit=0 next_sync=0 runtime sync_pending=0 sync_requested_ms=0 sync_response_buffer='' wait_ms input_timeout
     clock_ms
     start_ms=$now_ms
     if [[ -n ${audio_pid:-} ]]; then game_clock_init "$audio_ms" "$audio_sample_ms" "$now_ms"; fi
@@ -301,7 +334,11 @@ main() {
             return 1
         fi
         expire_notes
-        ((elapsed >= end_ms)) && break
+        if ((elapsed >= end_ms)); then
+            # With a known duration, confirm EOF instead of cutting the final
+            # audio buffer because the smoothed game clock is slightly ahead.
+            if [[ -z ${audio_pid:-} ]] || ((audio_duration_ms == 0 || audio_eof)); then break; fi
+        fi
         case $key in
             d|D) hit_lane 0 ;; f|F) hit_lane 1 ;;
             j|J) hit_lane 2 ;; k|K) hit_lane 3 ;;
@@ -325,6 +362,7 @@ main() {
         "$mode_label" \
         "$([[ $quit == 1 ]] && printf stopped || printf complete)" \
         "$score" "$max_combo" "$total" "$perfect" "$great" "$good" "$miss"
+    if ((!quit)); then record_high_score || :; fi
     if ((${#hit_errors[@]} >= 4)); then
         local -a ordered_errors=()
         local middle median

@@ -123,8 +123,8 @@ render_audio() {
     printf '%s\n' "$processed"
 }
 if [[ $MIDI_ACTION == render ]]; then render_audio; exit; fi
-MIDI_MODE=balanced-shell-v3
-((!MIDI_HOLDS)) || MIDI_MODE=balanced-holds-shell-v3
+MIDI_MODE=balanced-shell-v4
+((!MIDI_HOLDS)) || MIDI_MODE=balanced-holds-shell-v4
 [[ $MIDI_GRID == 1 ]] || MIDI_MODE+=-grid${MIDI_GRID/\//of}
 if [[ $MIDI_ACTION == chart ]]; then
     if [[ -z $output ]]; then

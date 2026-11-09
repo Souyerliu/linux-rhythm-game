@@ -9,7 +9,7 @@ load_chart() {
     local -A events=()
     [[ -f $file ]] || { chart_error "Chart not found: $file"; return 1; }
     chart_path=$file
-    chart_audio='' chart_offset=0 chart_bpm=120
+    chart_audio='' chart_offset=0 chart_bpm=120 chart_grid=''
     note_times=() note_lanes=() note_ends=() note_states=()
     tempo_beats=(0) tempo_bpms=(120)
     while IFS= read -r line || [[ -n $line ]]; do
@@ -19,6 +19,10 @@ load_chart() {
             '# audio='*) chart_audio=${line#'# audio='}; continue ;;
             '# offset_ms='*) chart_offset=${line#'# offset_ms='}; continue ;;
             '# bpm='*) chart_bpm=${line#'# bpm='}; continue ;;
+            '# rhythm_grid='*)
+                chart_grid=${line#'# rhythm_grid='}
+                case $chart_grid in 1|1/2|1/4) ;; *) chart_error "$file:$number: invalid rhythm_grid"; return 1 ;; esac
+                continue ;;
             '# tempo='*)
                 extra=${line#'# tempo='}
                 [[ $extra =~ ^([0-9]{1,7}),([0-9]{1,4})$ ]] || { chart_error "$file:$number: expected # tempo=beat,bpm"; return 1; }
@@ -127,6 +131,7 @@ save_chart() {
     temp=$(mktemp -- "${chart_path}.tmp.XXXXXX") || return 1
     if ! {
         printf '# Four Keys chart v1\n# audio=%s\n# offset_ms=%d\n# bpm=%d\n' "$chart_audio" "$chart_offset" "$chart_bpm"
+        [[ -z ${chart_grid:-} ]] || printf '# rhythm_grid=%s\n' "$chart_grid"
         for ((i=1; i<${#tempo_beats[@]}; i++)); do printf '# tempo=%d,%d\n' "$((tempo_beats[i] + 1))" "${tempo_bpms[i]}"; done
         for ((i=0; i<total; i++)); do
             printf '%d,%d' "${note_times[i]}" "${note_lanes[i]}"
@@ -149,11 +154,12 @@ start_audio() {
     esac
     coproc MUSIC { python3 "$GAME_ROOT/tools/mpv_bridge.py" "$audio_path"; }
     audio_pid=$MUSIC_PID audio_in=${MUSIC[1]} audio_out=${MUSIC[0]}
-    audio_eof=0
+    audio_eof=0 audio_duration_ms=0
     local response
-    if ! IFS= read -r -t 12 response <&"$audio_out" || [[ $response != READY ]]; then
+    if ! IFS= read -r -t 12 response <&"$audio_out" || [[ ! $response =~ ^READY(\ ([0-9]+))?$ ]]; then
         chart_error "Cannot start audio: ${response:-timeout}"; stop_audio; return 1
     fi
+    audio_duration_ms=${BASH_REMATCH[2]:-0}
 }
 
 audio_command() {

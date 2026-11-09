@@ -51,6 +51,24 @@ def grid_fixture():
     return b'MThd'+struct.pack('>IHHH',6,0,1,480)+b'MTrk'+struct.pack('>I',len(track))+track
 
 
+def sparse_piano_fixture():
+    def chunk(name, beats):
+        events = []
+        for beat in beats:
+            tick = round(beat * 480)
+            events += [(tick, b'\x90\x3c\x64'), (tick + 60, b'\x80\x3c\x00')]
+        data = b'\x00\xff\x03' + vlq(len(name)) + name
+        previous = 0
+        for tick, event in sorted(events):
+            data += vlq(tick - previous) + event
+            previous = tick
+        data += vlq(40 * 480 - previous) + b'\xff\x2f\x00'
+        return b'MTrk' + struct.pack('>I', len(data)) + data
+    return (b'MThd' + struct.pack('>IHHH', 6, 1, 2, 480)
+            + chunk(b'Lead', [4, 16, 28])
+            + chunk(b'Piano', list(range(4, 39)) + [4.5, 12.5, 30.5]))
+
+
 class MidiTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -140,7 +158,7 @@ class MidiTests(unittest.TestCase):
             text, notes = self.chart('--seed', seed, '--holds', '--generate-only', random=True)
             if first is None: first = text
             lanes_by_seed.append([n[1] for n in notes])
-            self.assertIn('# random_mode=balanced-holds-shell-v3', text)
+            self.assertIn('# random_mode=balanced-holds-shell-v4', text)
             self.assertIn('# hold_count=2', text)
             times = [(n[0], n[2] if len(n)==3 else n[0]) for n in notes]
             if timing is None: timing = times
@@ -212,7 +230,7 @@ class MidiTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7, result.stderr)
         args = (root / 'arguments').read_text().splitlines()
         self.assertEqual(args[1:], ['--fps','30','--offset','50','--silent'])
-        self.assertIn('balanced-shell-v3', Path(args[0]).name)
+        self.assertIn('balanced-shell-v4', Path(args[0]).name)
         self.assertTrue(Path(args[0]).is_file())
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe not installed')
@@ -263,6 +281,49 @@ class MidiTests(unittest.TestCase):
         self.assertEqual(len(notes),95)
         self.assertGreaterEqual(notes[0][0],2000)
         self.assertTrue(all(b[0]-a[0]>=300 for a,b in zip(notes,notes[1:])))
+
+    def test_sparse_easy_piano_fill_uses_real_onsets_and_preserves_manual_tracks(self):
+        self.source.write_bytes(sparse_piano_fixture())
+        text, notes = self.chart('--seed', '42', '--generate-only', random=True)
+        self.assertIn('# density_fill_track=1', text)
+        self.assertIn('# density_added=32', text)
+        self.assertEqual(len(notes), 35)
+        self.assertEqual([n[0] for n in notes], list(range(2000, 19500, 500)))
+        replay, again = self.chart('--seed', '42', '--generate-only', random=True)
+        self.assertEqual(text, replay)
+        self.assertEqual(notes, again)
+        _, other_seed = self.chart('--seed', '99', '--generate-only', random=True)
+        self.assertEqual([n[0] for n in notes], [n[0] for n in other_seed])
+        for args in (('--track', '0'), ('--support-track', '1'), ('--grid', '1/2'), ('--grid', '1/4')):
+            text, _ = self.chart(*args, '--seed', '42', '--generate-only', random=True)
+            self.assertNotIn('# density_fill_track=', text)
+        text, manual = self.chart('--track', '0', '--seed', '42', '--generate-only', random=True)
+        self.assertEqual([n[0] for n in manual], [2000, 8000, 14000])
+        text, imported = self.chart('--track', '0')
+        self.assertEqual([n[0] for n in imported], [2000, 8000, 14000])
+
+    def test_petrichor_easy_density_matches_swan_song(self):
+        petrichor = ROOT / 'songs/Petrichor.mid'
+        swan = ROOT / 'songs/Swan_song_–_Void.mid'
+        if not petrichor.exists() or not swan.exists(): self.skipTest('Reference MIDI songs are not present')
+        self.source = petrichor
+        text, notes = self.chart('--seed', '42', '--holds', '--generate-only', random=True)
+        self.assertIn('# density_fill_track=3', text)
+        self.assertEqual(len(notes), 288)
+        self.assertTrue(all(b[0]-a[0] >= 300 for a,b in zip(notes,notes[1:])))
+        self.assertLess(max(b[0]-a[0] for a,b in zip(notes,notes[1:])), 5000)
+        _, baseline = self.chart('--track', '9', '--support-track', '12', '--seed', '42', '--generate-only', random=True)
+        self.assertEqual(len(baseline), 166)
+        self.assertTrue({n[0] for n in baseline} <= {n[0] for n in notes})
+        _, other_seed = self.chart('--seed', '99', '--holds', '--generate-only', random=True)
+        self.assertEqual([(n[0], n[2:]) for n in notes], [(n[0], n[2:]) for n in other_seed])
+        _, taps = self.chart('--seed', '42', '--generate-only', random=True)
+        self.assertEqual([n[0] for n in notes], [n[0] for n in taps])
+        self.source = swan
+        text, swan_notes = self.chart('--seed', '42', '--holds', '--generate-only', random=True)
+        self.assertEqual(len(swan_notes), 282)
+        self.assertNotIn('# density_fill_track=', text)
+        self.assertLess(abs(len(notes)/164.705 - len(swan_notes)/160.541), .05)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)
