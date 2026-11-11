@@ -125,6 +125,89 @@ function fill_easy_piano(    n,t,tick,ms,i,k,size,target,left,right,distance,bes
         times[++total]=fill_times[i]; lanes[total]=0
     }
 }
+# Rebalance unusually uneven automatic charts in four-second phrases. Keep
+# ordinary charts intact; all replacements are real onsets on the chosen grid.
+function balance_phrases(    i,n,t,ms,b,buckets,sum,squares,mean,variance,count,cap,floor_count,size,left,right,distance,best,best_score,removed,added) {
+    if(!random_mode || subdivisions==1 || ENVIRON["MIDI_TRACK"]!="" || ENVIRON["MIDI_SUPPORT"]!="") return
+    buckets=int(milliseconds(end_tick)/4000)+1
+    for(i=1;i<=total;i++) phrase_counts[int(times[i]/4000)]++
+    for(b=0;b<buckets;b++) { sum+=phrase_counts[b]; squares+=phrase_counts[b]^2 }
+    mean=sum/buckets; variance=squares/buckets-mean^2
+    if(mean<=0 || variance<=mean^2*0.55^2) return
+    cap=subdivisions==2?18:28
+    floor_count=subdivisions==2?10:16
+    for(i=1;i<=total;i++) {
+        ms=times[i]; phrase_original[ms]=1
+        phrase_union[ms]=1
+    }
+    for(n=1;n<=note_count;n++) {
+        t=nt[n]
+        if(nc[n]==9 || (t!=track && t!=support && tolower(names[t]) !~ /piano|vocal|guitar/)) continue
+        if(ticks[n]*subdivisions%division) continue
+        ms=milliseconds(ticks[n]); if(ms<2000) continue
+        phrase_union[ms]=1; phrase_source_tracks[t]=1
+    }
+    for(ms in phrase_union) phrase_times[++size]=ms+0
+    sort(phrase_times,1,size)
+    # Spread the retained original heads across each crowded phrase.
+    for(b=0;b<buckets;b++) {
+        count=0
+        if(phrase_counts[b]<=cap) {
+            for(i=1;i<=size;i++) if(int(phrase_times[i]/4000)==b && (phrase_times[i] in phrase_original)) {
+                phrase_kept[phrase_times[i]]=1; count++
+            }
+        } else {
+            while(count<cap) {
+                right=(b+1)*4000
+                for(i=size;i>=1;i--) {
+                    ms=phrase_times[i]
+                    if(int(ms/4000)!=b) continue
+                    if(ms in phrase_kept) right=ms
+                    phrase_right[i]=right
+                }
+                left=max(2000,b*4000); best=0; best_score=-1
+                for(i=1;i<=size;i++) {
+                    ms=phrase_times[i]
+                    if(int(ms/4000)!=b) continue
+                    if(ms in phrase_kept) { left=ms; continue }
+                    if(!(ms in phrase_original)) continue
+                    distance=min(ms-left,phrase_right[i]-ms)
+                    if(distance>best_score) { best=i; best_score=distance }
+                }
+                if(!best) break
+                phrase_kept[phrase_times[best]]=1; count++
+            }
+            removed+=phrase_counts[b]-count
+        }
+        phrase_counts[b]=count
+    }
+    # Fill the widest gaps in sparse phrases, respecting neighbours even
+    # across phrase boundaries. Never create notes in a genuine MIDI rest.
+    while(1) {
+        right=milliseconds(end_tick)+minimum_gap
+        for(i=size;i>=1;i--) {
+            ms=phrase_times[i]
+            if(ms in phrase_kept) right=ms
+            phrase_right[i]=right
+        }
+        left=2000-minimum_gap; best=0; best_score=-1
+        for(i=1;i<=size;i++) {
+            ms=phrase_times[i]; b=int(ms/4000)
+            if(ms in phrase_kept) { left=ms; continue }
+            if(phrase_counts[b]>=floor_count) continue
+            distance=min(ms-left,phrase_right[i]-ms)
+            if(distance>=minimum_gap && distance>best_score) { best=i; best_score=distance }
+        }
+        if(!best) break
+        ms=phrase_times[best]; phrase_kept[ms]=1
+        phrase_counts[int(ms/4000)]++; added++
+    }
+    total=0
+    for(i=1;i<=size;i++) if(phrase_times[i] in phrase_kept) {
+        times[++total]=phrase_times[i]; lanes[total]=0
+    }
+    phrase_balanced=1; phrase_added=added+0; phrase_removed=removed+0
+}
 {
     for(field=1;field<=NF;field++) bytes[++size]=$field+0
 }
@@ -234,8 +317,9 @@ END {
     }
     if(!total) fail("Selected track has no usable notes")
     fill_easy_piano()
+    balance_phrases()
     if(ENVIRON["MIDI_HOLDS"]+0) {
-        for(n=1;n<=note_count;n++) if((nt[n]==track || (support!="" && nt[n]==support) || nt[n]==fill_track) && nc[n]!=9 && ends[n]>ticks[n]) {
+        for(n=1;n<=note_count;n++) if((nt[n]==track || (support!="" && nt[n]==support) || nt[n]==fill_track || (nt[n] in phrase_source_tracks)) && nc[n]!=9 && ends[n]>ticks[n]) {
             ms=milliseconds(ticks[n]); end=milliseconds(ends[n]); old=sources[ms]
             if(!old || end>milliseconds(ends[old])) sources[ms]=n
         }
@@ -287,6 +371,11 @@ END {
         if(fill_added) {
             print "# density_fill_track=" fill_track
             print "# density_added=" fill_added
+        }
+        if(phrase_balanced) {
+            print "# density_balanced=phrases-v1"
+            print "# density_added=" phrase_added
+            print "# density_removed=" phrase_removed
         }
         if(ENVIRON["MIDI_HOLDS"]+0) print "# hold_count=" (hold_count+0)
         print "# rhythm_grid=" ENVIRON["MIDI_GRID"]

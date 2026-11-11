@@ -182,7 +182,7 @@ render() {
     done
     local title=${mode_label:-PRACTICE}
     [[ -z ${score_grid:-} ]] || title+=" | GRID $score_grid | HIGH $best_score"
-    printf -v frame '  FOUR KEYS - %s\n  Beat:white Half:cyan Quarter:yellow Other:purple\n  SCORE %06d     COMBO %03d     BEST %03d\n\n' "$title" "$score" "$combo" "$max_combo"
+    printf -v frame '  FOUR KEYS - %s\n  Beat:white\t Half:cyan\t Quarter:yellow\t Other:purple\n  SCORE %06d     COMBO %03d     BEST %03d\n\n' "$title" "$score" "$combo" "$max_combo"
     frame+='          +-----+-----+-----+-----+'
     frame+=$'\n'
     for ((row=0; row<=height; row++)); do

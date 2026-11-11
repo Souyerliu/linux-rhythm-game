@@ -4,3 +4,4 @@ __pycache__/
 .cache/
 .local/
 presentation/
+songs/generated

@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import shutil
+import statistics
 import struct
 import subprocess
 import tempfile
@@ -67,6 +68,24 @@ def sparse_piano_fixture():
     return (b'MThd' + struct.pack('>IHHH', 6, 1, 2, 480)
             + chunk(b'Lead', [4, 16, 28])
             + chunk(b'Piano', list(range(4, 39)) + [4.5, 12.5, 30.5]))
+
+
+def uneven_phrase_fixture():
+    def chunk(name, ticks):
+        events = []
+        for tick in ticks:
+            events += [(tick, b'\x90\x3c\x64'), (tick + 60, b'\x80\x3c\x00')]
+        data = b'\x00\xff\x03' + vlq(len(name)) + name
+        previous = 0
+        for tick, event in sorted(events):
+            data += vlq(tick - previous) + event
+            previous = tick
+        data += vlq(80 * 480 - previous) + b'\xff\x2f\x00'
+        return b'MTrk' + struct.pack('>I', len(data)) + data
+    return (b'MThd' + struct.pack('>IHHH', 6, 1, 2, 480)
+            + chunk(b'Lead', list(range(24 * 480, 48 * 480, 120))
+                    + list(range(64 * 480, 80 * 480, 120)))
+            + chunk(b'Piano', range(4 * 480, 24 * 480, 240)))
 
 
 class MidiTests(unittest.TestCase):
@@ -158,7 +177,7 @@ class MidiTests(unittest.TestCase):
             text, notes = self.chart('--seed', seed, '--holds', '--generate-only', random=True)
             if first is None: first = text
             lanes_by_seed.append([n[1] for n in notes])
-            self.assertIn('# random_mode=balanced-holds-shell-v4', text)
+            self.assertIn('# random_mode=balanced-holds-shell-v5', text)
             self.assertIn('# hold_count=2', text)
             times = [(n[0], n[2] if len(n)==3 else n[0]) for n in notes]
             if timing is None: timing = times
@@ -230,7 +249,7 @@ class MidiTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7, result.stderr)
         args = (root / 'arguments').read_text().splitlines()
         self.assertEqual(args[1:], ['--fps','30','--offset','50','--silent'])
-        self.assertIn('balanced-shell-v4', Path(args[0]).name)
+        self.assertIn('balanced-shell-v5', Path(args[0]).name)
         self.assertTrue(Path(args[0]).is_file())
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe not installed')
@@ -324,6 +343,55 @@ class MidiTests(unittest.TestCase):
         self.assertEqual(len(swan_notes), 282)
         self.assertNotIn('# density_fill_track=', text)
         self.assertLess(abs(len(notes)/164.705 - len(swan_notes)/160.541), .05)
+
+    def test_phrase_balance_uses_real_onsets_and_preserves_rests(self):
+        self.source.write_bytes(uneven_phrase_fixture())
+        for grid, cap, gap in [('1/2', 18, 150), ('1/4', 28, 75)]:
+            with self.subTest(grid=grid):
+                text, notes = self.chart('--grid', grid, '--seed', '42', '--holds',
+                                         '--generate-only', random=True)
+                self.assertIn('# density_balanced=phrases-v1', text)
+                times = [n[0] for n in notes]
+                self.assertTrue(any(t < 12000 for t in times))
+                self.assertFalse(any(24000 <= t < 32000 for t in times))
+                onsets = set(range(2000, 12000, 250)) | set(range(12000, 24000, 125)) | set(range(32000, 40000, 125))
+                self.assertTrue(set(times) <= onsets)
+                self.assertLessEqual(max(Counter(t // 4000 for t in times).values()), cap)
+                self.assertTrue(all(b-a >= gap for a, b in zip(times, times[1:])))
+                _, again = self.chart('--grid', grid, '--seed', '99', '--holds',
+                                      '--generate-only', random=True)
+                self.assertEqual([(n[0], n[2:]) for n in notes], [(n[0], n[2:]) for n in again])
+                manual_text, manual = self.chart('--grid', grid, '--track', '0', '--seed', '42',
+                                                '--generate-only', random=True)
+                self.assertNotIn('# density_balanced=', manual_text)
+                self.assertTrue(all(n[0] >= 12000 for n in manual))
+                _, imported = self.chart('--grid', grid, '--track', '0')
+                self.assertEqual([n[0] for n in manual], [n[0] for n in imported])
+
+    def test_petrichor_fine_grids_have_comparable_distribution_to_swan(self):
+        petrichor = ROOT / 'songs/Petrichor.mid'
+        swan = ROOT / 'songs/Swan_song_–_Void.mid'
+        if not petrichor.exists() or not swan.exists():
+            self.skipTest('Reference MIDI songs are not present')
+        for grid in ('1/2', '1/4'):
+            with self.subTest(grid=grid):
+                self.source = petrichor
+                text, notes = self.chart('--grid', grid, '--seed', '42', '--holds',
+                                         '--generate-only', random=True)
+                self.assertIn('# density_balanced=phrases-v1', text)
+                bins = [sum(start <= n[0] < start+10000 for n in notes)
+                        for start in range(0, 160000, 10000)]
+                self.assertLess(statistics.pstdev(bins) / statistics.mean(bins), .4)
+                self.assertGreater(min(bins), 15)
+                self.assertLess(max(b[0]-a[0] for a, b in zip(notes, notes[1:])), 2000)
+                self.source = swan
+                swan_text, swan_notes = self.chart('--grid', grid, '--seed', '42', '--holds',
+                                                   '--generate-only', random=True)
+                self.assertNotIn('# density_balanced=', swan_text)
+                self.assertLess(abs(len(notes)/164.705 - len(swan_notes)/160.541), 1)
+                _, manual = self.chart('--grid', grid, '--track', '0', '--seed', '42', '--holds',
+                                       '--generate-only', random=True)
+                self.assertEqual(swan_notes, manual)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)
