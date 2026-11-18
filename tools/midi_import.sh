@@ -14,7 +14,7 @@ Usage: bash tools/midi_import.sh MIDI [options]
   --holds --grid 1|1/2|1/4      Include holds / choose rhythm grid
   --render-only                 Print cached rendered WAV path
   --soundfont FILE --loudness balanced|original
-Random entry: ./random-play.sh MIDI [options]
+Random entry: bash tools/random_midi.sh MIDI [options]
   --seed 0..4294967295 --generate-only --output CHART.csv
   --track N --support-track N --holds --grid 1|1/2|1/4
   --fps 15..120 --offset MS --speed 0.5..5.0 --silent

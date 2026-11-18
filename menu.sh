@@ -112,7 +112,7 @@ main() {
                 if [[ $key == p || $key == P ]]; then
                     command=(bash "$GAME_ROOT/game.sh" --practice "${practice_options[@]}" --speed "$scroll_label")
                 else
-                    command=(bash "$GAME_ROOT/random-play.sh" "${songs[selected]}" --grid "${grids[difficulty]}" "${options[@]}" --speed "$scroll_label")
+                    command=(bash "$GAME_ROOT/tools/random_midi.sh" "${songs[selected]}" --grid "${grids[difficulty]}" "${options[@]}" --speed "$scroll_label")
                     ((!holds)) || command+=(--holds)
                 fi
                 "${command[@]}"; result=$?

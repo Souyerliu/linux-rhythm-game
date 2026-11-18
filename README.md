@@ -48,21 +48,22 @@ sudo apt install mpv python3 fluidsynth timgm6mb-soundfont ffmpeg
 # 无音乐练习
 ./game.sh --practice --speed 2
 
-# 指定歌曲、难度和种子，生成谱面后直接游玩
-./random-play.sh 'songs/Swan_song_–_Void.mid' --seed 42 --grid 1/2 --holds
-
 # 游玩已有谱面
 ./game.sh songs/far-in-the-blue-sky-easy/chart.csv
 ```
 
 `--grid` 可选 `1`、`1/2`、`1/4`；`--holds` 启用长条。
 
-从菜单选歌或直接运行 `random-play.sh` 时，自动生成的谱面会在打完或中途退出后删除。需要保留谱面时可用 `--output 路径.csv`，也可加 `--generate-only` 只生成并保存谱面。
+从菜单选歌时，自动生成的谱面会在打完或中途退出后删除。需要单独生成并保存谱面时，可运行：
+
+```bash
+bash tools/random_midi.sh 'songs/Swan_song_–_Void.mid' --seed 42 --grid 1/2 --holds --generate-only --output chart.csv
+```
 
 自动生成的 `1/2`、`1/4` 谱面会检查分段密度：分布明显失衡时，从钢琴、人声、吉他和贝斯的真实网格落点补充稀疏段，并适度抽稀过密段；没有音符的休止段保持留白。手动指定音轨时跳过密度调整。
 
 生成器 `v8` 会为在 0 毫秒有起音的 MIDI 自动加入 2 秒开场空档。谱面通过 `# midi_preroll_ms=2000` 保存这段空档，播放时把它同时加到音频和谱面时间线上。空档长度独立于流速，CSV 中的音符时间仍以原曲开头为基准。
 
-`game.sh`、`menu.sh` 和 `random-play.sh` 均支持 `--speed 2` 指定初始流速（最多一位小数）。
+`game.sh` 和 `menu.sh` 均支持 `--speed 2` 指定初始流速（最多一位小数）。
 
 支持 MIDI 中途变速，包括非整拍变速和小数 BPM。导入器按原始 tick 和每拍微秒数计算普通音符、长条头尾的时间；需要精确速度图时，CSV 使用 `# midi_division=PPQN` 和 `# midi_tempo=tick,微秒每拍` 保存。编辑器可编辑音符并保留此速度图，但修改这类谱面的 BPM 需在 MIDI 源文件中完成后重新导入。谱面流速倍率仍独立于音乐速度。
