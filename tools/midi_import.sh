@@ -18,6 +18,7 @@ Random entry: ./random-play.sh MIDI [options]
   --seed 0..4294967295 --generate-only --output CHART.csv
   --track N --support-track N --holds --grid 1|1/2|1/4
   --fps 15..120 --offset MS --speed 0.5..5.0 --silent
+  Charts generated for play are temporary unless --output is specified.
 EOF
 }
 MIDI_ACTION=chart MIDI_RANDOM=0 MIDI_TRACK='' MIDI_SUPPORT='' MIDI_HOLDS=0 MIDI_GRID=1 MIDI_SEED=''
@@ -76,7 +77,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'exit 143' TERM HUP
 
 render_audio() {
     local executable font='' candidate key cache raw processed temp filter version before after
@@ -130,13 +131,20 @@ if [[ $MIDI_ACTION == render ]]; then render_audio; exit; fi
 MIDI_MODE=balanced-shell-v8
 ((!MIDI_HOLDS)) || MIDI_MODE=balanced-holds-shell-v8
 [[ $MIDI_GRID == 1 ]] || MIDI_MODE+=-grid${MIDI_GRID/\//of}
+chart=$work/chart.csv
+temporary_chart=0
 if [[ $MIDI_ACTION == chart ]]; then
     if [[ -z $output ]]; then
         ((MIDI_RANDOM)) || fail 'Specify --output chart.csv or --analyze/--render-only'
-        digest=$({ cat -- "$source_path"; printf '%s' "$source_path"; } | sha256sum)
-        name=${source_path##*/}; name=${name%.*}
-        name=$(printf '%s' "$name" | tr -c 'a-zA-Z0-9._-' '-')
-        output=$GAME_ROOT/songs/generated/${name:0:48}-${digest:0:12}-$MIDI_MODE-t${MIDI_TRACK:-auto}-b${MIDI_SUPPORT:-auto}-seed$MIDI_SEED.csv
+        if ((generate_only)); then
+            digest=$({ cat -- "$source_path"; printf '%s' "$source_path"; } | sha256sum)
+            name=${source_path##*/}; name=${name%.*}
+            name=$(printf '%s' "$name" | tr -c 'a-zA-Z0-9._-' '-')
+            output=$GAME_ROOT/songs/generated/${name:0:48}-${digest:0:12}-$MIDI_MODE-t${MIDI_TRACK:-auto}-b${MIDI_SUPPORT:-auto}-seed$MIDI_SEED.csv
+        else
+            output=$chart
+            temporary_chart=1
+        fi
     fi
     output=$(realpath -m -- "$output")
     MIDI_AUDIO=$(realpath -m --relative-to="$(dirname -- "$output")" -- "$source_path")
@@ -145,21 +153,21 @@ else
     MIDI_AUDIO=''
 fi
 export MIDI_ACTION MIDI_RANDOM MIDI_TRACK MIDI_SUPPORT MIDI_GRID MIDI_HOLDS MIDI_SEED MIDI_MODE MIDI_AUDIO
-od -An -v -tu1 -- "$source_path" | awk -f "$GAME_ROOT/tools/midi_chart.awk" >"$work/chart"
-if [[ $MIDI_ACTION == analyze ]]; then cat -- "$work/chart"; exit; fi
-mkdir -p -- "$(dirname -- "$output")"
-# Hard-link publication creates the destination atomically without overwriting it.
-publish_temp=$(mktemp -- "${output}.tmp.XXXXXXXX")
-cat -- "$work/chart" >"$publish_temp"
-if ln -T -- "$publish_temp" "$output" 2>/dev/null; then
-    rm -f -- "$publish_temp"
-else
-    rm -f -- "$publish_temp"
-    if ((!MIDI_RANDOM)) || ! cmp -s -- "$work/chart" "$output"; then
-        fail "Chart already exists or cannot be created: $output. Choose another --output or --seed"
+od -An -v -tu1 -- "$source_path" | awk -f "$GAME_ROOT/tools/midi_chart.awk" >"$chart"
+if [[ $MIDI_ACTION == analyze ]]; then cat -- "$chart"; exit; fi
+if ((!temporary_chart)); then
+    mkdir -p -- "$(dirname -- "$output")"
+    # Hard-link publication creates the destination atomically without overwriting it.
+    publish_temp=$(mktemp -- "${output}.tmp.XXXXXXXX")
+    cat -- "$chart" >"$publish_temp"
+    if ! ln -T -- "$publish_temp" "$output" 2>/dev/null; then
+        if ((!MIDI_RANDOM)) || ! cmp -s -- "$chart" "$output"; then
+            fail "Chart already exists or cannot be created: $output. Choose another --output or --seed"
+        fi
     fi
+    rm -f -- "$publish_temp"
+    publish_temp=''
 fi
-publish_temp=''
 ((!MIDI_RANDOM)) || printf 'Seed: %s | Grid: %s beat\n' "$MIDI_SEED" "$MIDI_GRID"
 printf 'Chart: %s\n' "$output"
 if ((MIDI_RANDOM && !generate_only)); then

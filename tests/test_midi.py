@@ -328,13 +328,19 @@ beat_to_ms 4000000; [[ $mapped_ms == 938 ]] || exit 5
 
     def test_random_launches_game_and_default_path(self):
         root = self.isolated_project()
-        (root / 'game.sh').write_text('printf "%s\\n" "$@" > "$(dirname -- "$0")/arguments"\nexit 7\n')
+        (root / 'game.sh').write_text('[[ -f $1 ]] || exit 1\n'
+                                      'printf "%s\\n" "$@" > "$(dirname -- "$0")/arguments"\nexit 7\n')
         result = self.run_import('--seed','8','--silent','--fps','30','--offset','50','--speed','2.5', random=True, root=root)
         self.assertEqual(result.returncode, 7, result.stderr)
         args = (root / 'arguments').read_text().splitlines()
         self.assertEqual(args[1:], ['--fps','30','--offset','50','--speed','2.5','--silent'])
-        self.assertIn('balanced-shell-v8', Path(args[0]).name)
-        self.assertTrue(Path(args[0]).is_file())
+        self.assertFalse(Path(args[0]).exists())
+        self.assertFalse((root / 'songs' / 'generated').exists())
+
+        result = self.run_import('--seed', '8', '--generate-only', random=True, root=root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        saved, = (root / 'songs' / 'generated').glob('*-balanced-shell-v8-*-seed8.csv')
+        self.assertIn('# random_seed=8', saved.read_text())
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe not installed')
     def test_render_cache_volume_and_timing(self):

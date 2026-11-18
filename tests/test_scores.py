@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 import os
 from pathlib import Path
-import shlex
-import shutil
+import re
 import subprocess
 import tempfile
 import unittest
@@ -133,25 +132,25 @@ load_chart "$1" || exit 4
         self.assertGreaterEqual(data.count(b'SONG SELECT'), 2)
 
     def test_menu_play_complete_and_return_refreshes_best(self):
-        # An isolated launcher keeps the generated chart out of the user's songs.
-        app = self.directory / 'app'; app.mkdir()
-        shutil.copy(ROOT / 'menu.sh', app / 'menu.sh')
-        (app / 'lib').symlink_to(ROOT / 'lib', target_is_directory=True)
-        (app / 'tools').symlink_to(ROOT / 'tools', target_is_directory=True)
-        output = self.directory / 'generated.csv'
-        (app / 'random-play.sh').write_text(
-            'exec bash ' + shlex.quote(str(ROOT / 'random-play.sh'))
-            + ' "$@" --output ' + shlex.quote(str(output)) + '\n')
         data = test_game.GameTests().terminal(
-            ['bash', str(app / 'menu.sh'), '--songs', str(self.directory), '--silent', '--seed', '42'],
+            ['bash', 'menu.sh', '--songs', str(self.directory), '--silent', '--seed', '42'],
             [(.3, b'dh\n'), (4.6, b' '), (5.0, b'q')], self.env)
         self.assertIn(b'CHART complete', data[-10000:])
         self.assertIn(b'High score (grid 1/4): 0  NEW BEST!', data[-10000:])
         self.assertGreaterEqual(data.count(b'SONG SELECT'), 2)
         self.assertIn(b'High score: 0', data[-3000:])
-        self.assertIn('# rhythm_grid=1/4', output.read_text())
-        self.assertNotIn('# hold_count=', output.read_text())
+        chart_path, = re.findall(rb'^Chart: ([^\r\n]+)', data, re.MULTILINE)
+        self.assertFalse(Path(os.fsdecode(chart_path)).exists())
         self.assertEqual(self.score('get', '1/4'), '0')
+
+    def test_menu_quit_removes_generated_chart(self):
+        data = test_game.GameTests().terminal(
+            ['bash', 'menu.sh', '--songs', str(self.directory), '--silent', '--seed', '42'],
+            [(.3, b'\n'), (.7, b'q'), (1.0, b' '), (1.3, b'q')], self.env)
+        self.assertIn(b'CHART stopped', data)
+        chart_path, = re.findall(rb'^Chart: ([^\r\n]+)', data, re.MULTILINE)
+        self.assertFalse(Path(os.fsdecode(chart_path)).exists())
+        self.assertEqual(self.score('get'), '-')
 
 
 if __name__ == '__main__':
