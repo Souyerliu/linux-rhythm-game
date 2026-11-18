@@ -101,6 +101,36 @@ class GameTests(unittest.TestCase):
             self.assertIn('# hold_count=0', chart.read_text())
             self.assertEqual(len([line for line in chart.read_text().splitlines() if not line.startswith('#')]),95)
 
+    def test_midi_intro_note_has_time_to_approach(self):
+        with tempfile.TemporaryDirectory() as directory:
+            chart = Path(directory) / 'intro.csv'
+            chart.write_text('# audio=intro.mid\n0,0\n')
+            data = self.terminal(['bash', 'game.sh', str(chart), '--silent'],
+                                 [(1.0, b'd'), (1.3, b'q')])
+            self.assertIn(b'Get ready! First note in 1.0 s', data)
+            self.assertIn(b'Max combo: 1 / 1', data)
+
+    def test_midi_intro_note_is_synced_after_fixed_silence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            chart = directory / 'intro.csv'
+            chart.write_text('# audio=intro.mid\n# midi_preroll_ms=2000\n0,0\n')
+            mpv = directory / 'mpv'
+            shutil.copy(ROOT / 'tests/fake_mpv.py', mpv)
+            mpv.chmod(0o755)
+            play_time = directory / 'play-time'
+            env = {'PATH': str(directory) + ':' + os.environ['PATH'],
+                   'TEST_MPV_PLAY_TIME': str(play_time)}
+
+            def after_play(age):
+                return lambda _: (play_time.exists() and bool(play_time.read_text())
+                                  and time.monotonic() - float(play_time.read_text()) >= age)
+
+            data = self.terminal(['bash', 'game.sh', str(chart), '--audio', str(self.audio), '--speed', '5'],
+                                 [(after_play(2.03), b'd'), (after_play(2.3), b'q')], env)
+            self.assertIn(b'Get ready! First note in 2.0 s', data)
+            self.assertIn(b'Max combo: 1 / 1', data)
+
     def test_game_uses_terminal_height(self):
         for rows in (28,48):
             data = self.terminal(['bash','game.sh','--practice'],[(.15,b'q')],size=(rows,90))

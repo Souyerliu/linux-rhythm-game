@@ -9,6 +9,29 @@ import subprocess
 import sys
 import tempfile
 import time
+import wave
+
+
+def prepend_silence(source, target, delay_ms):
+    """Create a continuous audio stream that starts before the first note."""
+    try:
+        pcm = wave.open(source, 'rb')
+    except (wave.Error, EOFError):
+        # An explicit audio override can be encoded in a format other than WAV.
+        subprocess.run([
+            'ffmpeg', '-nostdin', '-loglevel', 'error', '-i', source,
+            '-map', '0:a:0', '-af', f'adelay={delay_ms}:all=1', '-c:a', 'pcm_s16le', target,
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
+        return
+    with pcm, wave.open(target, 'wb') as padded:
+        padded.setparams(pcm.getparams())
+        frames = round(delay_ms * pcm.getframerate() / 1000)
+        silence = b'\x80' if pcm.getsampwidth() == 1 else b'\x00' * pcm.getsampwidth()
+        sample_frame = silence * pcm.getnchannels()
+        for offset in range(0, frames, 65536):
+            padded.writeframesraw(sample_frame * min(frames - offset, 65536))
+        for block in iter(lambda: pcm.readframes(65536), b''):
+            padded.writeframesraw(block)
 
 
 def main():
@@ -17,11 +40,17 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix='fourkeys-') as directory:
             path = os.path.join(directory, 'mpv.sock')
+            audio_path = os.path.abspath(sys.argv[1])
+            delay_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+            if delay_ms:
+                padded_path = os.path.join(directory, 'preroll.wav')
+                prepend_silence(audio_path, padded_path, delay_ms)
+                audio_path = padded_path
             with tempfile.TemporaryFile(mode='w+') as log:
                 player = subprocess.Popen([
                     'mpv', '--no-config', '--no-video', '--no-terminal',
                     '--pause=yes', '--keep-open=yes', '--audio-display=no',
-                    '--input-ipc-server=' + path, '--', os.path.abspath(sys.argv[1]),
+                    '--input-ipc-server=' + path, '--', audio_path,
                 ], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
                 conn = socket.socket(socket.AF_UNIX)
                 deadline = time.monotonic() + 8
@@ -95,6 +124,14 @@ def main():
                     elif parts[0] != 'time':
                         raise RuntimeError('unknown bridge command')
                     position = audio_position()
+                    if parts[0] == 'play' and delay_ms:
+                        # A zero PTS at unpause can precede audio device startup.
+                        deadline = time.monotonic() + 2
+                        while position <= 0:
+                            if time.monotonic() >= deadline:
+                                raise RuntimeError('audio clock did not start')
+                            time.sleep(.005)
+                            position = audio_position()
                     sampled_ms = time.time_ns() // 1_000_000
                     ended = bool(command('get_property', 'eof-reached'))
                     print(f'OK {round(position * 1000)} {int(ended)} {sampled_ms}', flush=True)

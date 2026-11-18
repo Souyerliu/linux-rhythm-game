@@ -2,6 +2,7 @@
 # Terminal song selector. Gameplay remains in its own process/terminal session.
 GAME_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$GAME_ROOT/lib/terminal.sh"
+source "$GAME_ROOT/lib/scroll.sh"
 
 menu_cleanup() {
     if [[ -n ${menu_stty:-} ]]; then
@@ -45,25 +46,30 @@ menu_render() {
         printf -v line '  %s %-6s  grid %-3s  High score: %s\n' "$marker" "${labels[i]}" "${grids[i]}" "${highs[i]}"
         frame+=$line
     done
-    printf -v line '\n  Holds: %s\n  %s\n' "$([[ $holds == 1 ]] && printf ON || printf OFF)" "$status"
+    printf -v line '\n  Holds: %s   Speed: %sx (-/+)\n  %s\n' "$([[ $holds == 1 ]] && printf ON || printf OFF)" "$scroll_label" "$status"
     frame+=$line
     present_frame "$frame"
 }
 
 main() {
     local song_dir=$GAME_ROOT/songs selected=0 difficulty=1 holds=1 key suffix status='Choose a song and difficulty.'
+    local scroll_speed=$SCROLL_DEFAULT_SPEED scroll_window_ms scroll_label
     local menu_stty='' dimensions rows cols page_size width result song
     local -a songs=() grids=(1 1/2 1/4) labels=(Easy Normal Hard) highs=() options=() practice_options=() command=()
+    update_scroll_speed
     while (($#)); do
         case $1 in
             --songs) (($# >= 2)) || return 1; song_dir=$2; shift 2 ;;
+            --speed)
+                (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; return 1; }
+                set_scroll_speed "$2" || return 1; shift 2 ;;
             --silent) options+=( "$1" ); practice_options+=( "$1" ); shift ;;
             --fps|--offset|--seed)
                 (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; return 1; }
                 [[ $1 == --seed ]] || practice_options+=( "$1" "$2" )
                 options+=( "$1" "$2" ); shift 2 ;;
             -h|--help)
-                printf 'Usage: ./menu.sh [--songs DIR] [--silent] [--fps N] [--offset MS] [--seed N]\n'
+                printf 'Usage: ./menu.sh [--songs DIR] [--silent] [--fps N] [--offset MS] [--seed N] [--speed 0.5-5.0]\n'
                 return 0 ;;
             *) printf 'Unknown menu option: %s\n' "$1" >&2; return 1 ;;
         esac
@@ -98,13 +104,15 @@ main() {
             s|S) selected=$(((selected + 1) % ${#songs[@]})); menu_scores ;;
             a|A) difficulty=$(((difficulty + 2) % 3)) ;;
             d|D) difficulty=$(((difficulty + 1) % 3)) ;;
+            '-'|'_') adjust_scroll_speed -1 ;;
+            '+'|'=') adjust_scroll_speed 1 ;;
             h|H) holds=$((1 - holds)) ;;
             ''|p|P)
                 menu_cleanup
                 if [[ $key == p || $key == P ]]; then
-                    command=(bash "$GAME_ROOT/game.sh" --practice "${practice_options[@]}")
+                    command=(bash "$GAME_ROOT/game.sh" --practice "${practice_options[@]}" --speed "$scroll_label")
                 else
-                    command=(bash "$GAME_ROOT/random-play.sh" "${songs[selected]}" --grid "${grids[difficulty]}" "${options[@]}")
+                    command=(bash "$GAME_ROOT/random-play.sh" "${songs[selected]}" --grid "${grids[difficulty]}" "${options[@]}" --speed "$scroll_label")
                     ((!holds)) || command+=(--holds)
                 fi
                 "${command[@]}"; result=$?

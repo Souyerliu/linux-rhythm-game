@@ -3,6 +3,7 @@
 set -euo pipefail
 export LC_ALL=C
 GAME_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+source "$GAME_ROOT/lib/scroll.sh"
 fail() { printf 'MIDI import error: %s\n' "$*" >&2; exit 1; }
 usage() {
     cat <<'EOF'
@@ -16,12 +17,14 @@ Usage: bash tools/midi_import.sh MIDI [options]
 Random entry: ./random-play.sh MIDI [options]
   --seed 0..4294967295 --generate-only --output CHART.csv
   --track N --support-track N --holds --grid 1|1/2|1/4
-  --fps 15..120 --offset MS --silent
+  --fps 15..120 --offset MS --speed 0.5..5.0 --silent
 EOF
 }
 MIDI_ACTION=chart MIDI_RANDOM=0 MIDI_TRACK='' MIDI_SUPPORT='' MIDI_HOLDS=0 MIDI_GRID=1 MIDI_SEED=''
 source_path='' output='' soundfont='' loudness=${RHYTHM_MIDI_LOUDNESS:-balanced}
 generate_only=0 fps=60 offset=0 silent=0
+scroll_speed=$SCROLL_DEFAULT_SPEED
+update_scroll_speed
 while (($#)); do
     case $1 in
         --help|-h) usage; exit 0 ;;
@@ -31,12 +34,13 @@ while (($#)); do
         --holds) MIDI_HOLDS=1; shift ;;
         --generate-only) generate_only=1; shift ;;
         --silent) silent=1; shift ;;
-        --track|--support-track|--grid|--seed|--output|--soundfont|--loudness|--fps|--offset)
+        --track|--support-track|--grid|--seed|--output|--soundfont|--loudness|--fps|--offset|--speed)
             (($#>=2)) || fail "Missing value for $1"
             case $1 in
                 --track) MIDI_TRACK=$2 ;; --support-track) MIDI_SUPPORT=$2 ;;
                 --grid) MIDI_GRID=$2 ;; --seed) MIDI_SEED=$2 ;; --output) output=$2 ;;
                 --soundfont) soundfont=$2 ;; --loudness) loudness=$2 ;;
+                --speed) set_scroll_speed "$2" || exit 1 ;;
                 --fps) fps=$2 ;; --offset) offset=$2 ;;
             esac
             shift 2 ;;
@@ -123,8 +127,8 @@ render_audio() {
     printf '%s\n' "$processed"
 }
 if [[ $MIDI_ACTION == render ]]; then render_audio; exit; fi
-MIDI_MODE=balanced-shell-v5
-((!MIDI_HOLDS)) || MIDI_MODE=balanced-holds-shell-v5
+MIDI_MODE=balanced-shell-v8
+((!MIDI_HOLDS)) || MIDI_MODE=balanced-holds-shell-v8
 [[ $MIDI_GRID == 1 ]] || MIDI_MODE+=-grid${MIDI_GRID/\//of}
 if [[ $MIDI_ACTION == chart ]]; then
     if [[ -z $output ]]; then
@@ -159,7 +163,7 @@ publish_temp=''
 ((!MIDI_RANDOM)) || printf 'Seed: %s | Grid: %s beat\n' "$MIDI_SEED" "$MIDI_GRID"
 printf 'Chart: %s\n' "$output"
 if ((MIDI_RANDOM && !generate_only)); then
-    command=(bash "$GAME_ROOT/game.sh" "$output" --fps "$fps" --offset "$offset")
+    command=(bash "$GAME_ROOT/game.sh" "$output" --fps "$fps" --offset "$offset" --speed "$scroll_label")
     ((!silent)) || command+=(--silent)
     "${command[@]}"
 fi

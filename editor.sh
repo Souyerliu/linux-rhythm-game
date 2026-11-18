@@ -259,7 +259,11 @@ render_editor() {
             label=$t; ms_to_beat "$t"; row_ticks=$beat_ticks
         fi
         row_bpm=$current_bpm; marker=' '
-        ((row_ticks == tempo_beats[timing_segment] * 1000000)) && marker='*'
+        if ((${midi_division:-0})); then
+            ((row_ticks * midi_division == midi_ticks[timing_segment] * 1000000)) && marker='*'
+        else
+            ((row_ticks == tempo_beats[timing_segment] * 1000000)) && marker='*'
+        fi
         printf -v line '  %9s %3d%s    ' "$label" "$row_bpm" "$marker"
         for ((track=0; track<4; track++)); do
             cell=${visible[$row,$track]:-'  .   '}
@@ -289,6 +293,7 @@ editor_main() {
     else
         [[ -d $(dirname -- "$file") ]] || { chart_error 'Create the chart directory first'; return 1; }
         chart_path=$file chart_audio='' audio_path='' chart_bpm=120 chart_offset=0
+        midi_division=0 midi_ticks=() midi_tempos=()
         tempo_beats=(0) tempo_bpms=(120); build_timing
         note_times=() note_lanes=() note_ends=() note_states=(); sort_notes
     fi

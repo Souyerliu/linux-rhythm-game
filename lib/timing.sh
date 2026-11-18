@@ -3,6 +3,19 @@
 # Segment start times use microseconds to avoid cumulative ms rounding.
 build_timing() {
     local i span
+    if ((${midi_division:-0})); then
+        # Exact accumulated microseconds * PPQN; never accumulate rounded BPM.
+        midi_start_units=(0) tempo_us=(0) tempo_beats=() tempo_bpms=()
+        for ((i=0; i<${#midi_ticks[@]}; i++)); do
+            if ((i)); then
+                midi_start_units[i]=$((midi_start_units[i-1] + (midi_ticks[i] - midi_ticks[i-1]) * midi_tempos[i-1]))
+                tempo_us[i]=$((midi_start_units[i] / midi_division))
+            fi
+            tempo_beats[i]=$((midi_ticks[i] / midi_division))
+            tempo_bpms[i]=$(((60000000 + midi_tempos[i] / 2) / midi_tempos[i]))
+        done
+        return 0
+    fi
     tempo_beats[0]=0 tempo_bpms[0]=$chart_bpm tempo_us=(0)
     for ((i=1; i<${#tempo_beats[@]}; i++)); do
         span=$(((tempo_beats[i] - tempo_beats[i-1]) * 60000000))
@@ -14,7 +27,11 @@ bpm_at_beat() {
     local ticks=$1 low=0 high=$((${#tempo_beats[@]} - 1)) mid
     while ((low < high)); do
         mid=$(((low + high + 1) / 2))
-        if ((ticks >= tempo_beats[mid] * 1000000)); then low=$mid; else high=$((mid - 1)); fi
+        if ((${midi_division:-0})); then
+            if ((ticks * midi_division >= midi_ticks[mid] * 1000000)); then low=$mid; else high=$((mid - 1)); fi
+        else
+            if ((ticks >= tempo_beats[mid] * 1000000)); then low=$mid; else high=$((mid - 1)); fi
+        fi
     done
     timing_segment=$low
     current_bpm=${tempo_bpms[timing_segment]}
@@ -23,6 +40,19 @@ bpm_at_beat() {
 beat_to_ms() {
     local ticks=$1 micros
     bpm_at_beat "$ticks"
+    if ((${midi_division:-0})); then
+        local delta units denominator remainder duration=${midi_tempos[timing_segment]}
+        delta=$((ticks * midi_division - midi_ticks[timing_segment] * 1000000))
+        # Split the product to stay within Bash's signed 64-bit arithmetic.
+        units=$((midi_start_units[timing_segment] + delta / 1000000 * duration + (delta % 1000000 * duration + 500000) / 1000000))
+        denominator=$((midi_division * 1000))
+        mapped_ms=$((units / denominator)); remainder=$((units % denominator))
+        # Match the MIDI importer's nearest-even millisecond rounding.
+        ((remainder * 2 < denominator)) || {
+            if ((remainder * 2 > denominator || mapped_ms % 2)); then ((mapped_ms+=1)); fi
+        }
+        return 0
+    fi
     micros=$((tempo_us[timing_segment] + ((ticks - tempo_beats[timing_segment] * 1000000) * 60 + current_bpm / 2) / current_bpm))
     mapped_ms=$(((micros + 500) / 1000))
 }
@@ -31,10 +61,20 @@ ms_to_beat() {
     local ms=$1 segment=0 nearest difference original low=0 high=$((${#tempo_us[@]} - 1)) mid
     while ((low < high)); do
         mid=$(((low + high + 1) / 2))
-        if ((ms * 1000 >= tempo_us[mid])); then low=$mid; else high=$((mid - 1)); fi
+        if ((${midi_division:-0})); then
+            if ((ms * 1000 * midi_division >= midi_start_units[mid])); then low=$mid; else high=$((mid - 1)); fi
+        else
+            if ((ms * 1000 >= tempo_us[mid])); then low=$mid; else high=$((mid - 1)); fi
+        fi
     done
     segment=$low
-    beat_ticks=$((tempo_beats[segment] * 1000000 + (ms * 1000 - tempo_us[segment]) * tempo_bpms[segment] / 60))
+    if ((${midi_division:-0})); then
+        local units duration=${midi_tempos[segment]}
+        units=$((ms * 1000 * midi_division - midi_start_units[segment]))
+        beat_ticks=$(((midi_ticks[segment] * 1000000 + units / duration * 1000000 + units % duration * 1000000 / duration) / midi_division))
+    else
+        beat_ticks=$((tempo_beats[segment] * 1000000 + (ms * 1000 - tempo_us[segment]) * tempo_bpms[segment] / 60))
+    fi
     # Exact quarter-beat boundaries may round up/down in integer ms. Recover
     # them before further grid movement so repeated 1/4 steps do not drift.
     nearest=$(((beat_ticks + 125000) / 250000 * 250000))
@@ -52,6 +92,10 @@ format_beat() {
 
 # Replace/remove one integer-beat event and preserve note positions in beats.
 change_tempo() {
+    if ((${midi_division:-0})); then
+        status='Imported MIDI tempo map is preserved; edit tempo in the MIDI source'
+        return 1
+    fi
     local beat=$1 bpm=$2 remove=${3:-0} i inserted=0 cursor_ticks t key
     local -a ticks=() end_ticks=() new_times=() new_ends=() beats=() bpms=()
     local -a old_times=( "${note_times[@]}" ) old_ends=()

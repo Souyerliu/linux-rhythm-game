@@ -9,9 +9,10 @@ load_chart() {
     local -A events=()
     [[ -f $file ]] || { chart_error "Chart not found: $file"; return 1; }
     chart_path=$file
-    chart_audio='' chart_offset=0 chart_bpm=120 chart_grid=''
+    chart_audio='' chart_offset=0 chart_bpm=120 chart_grid='' chart_midi_preroll_ms=0
     note_times=() note_lanes=() note_ends=() note_states=()
     tempo_beats=(0) tempo_bpms=(120)
+    midi_division=0 midi_ticks=() midi_tempos=()
     while IFS= read -r line || [[ -n $line ]]; do
         ((number+=1))
         line=${line%$'\r'}
@@ -19,6 +20,28 @@ load_chart() {
             '# audio='*) chart_audio=${line#'# audio='}; continue ;;
             '# offset_ms='*) chart_offset=${line#'# offset_ms='}; continue ;;
             '# bpm='*) chart_bpm=${line#'# bpm='}; continue ;;
+            '# midi_preroll_ms='*)
+                extra=${line#'# midi_preroll_ms='}
+                [[ $extra =~ ^[0-9]{1,4}$ ]] || { chart_error "$file:$number: invalid midi_preroll_ms"; return 1; }
+                chart_midi_preroll_ms=$((10#$extra)); continue ;;
+            '# midi_division='*)
+                extra=${line#'# midi_division='}
+                [[ $extra =~ ^[0-9]{1,5}$ ]] || { chart_error 'Invalid MIDI division'; return 1; }
+                ((midi_division == 0)) || { chart_error 'Duplicate MIDI division'; return 1; }
+                midi_division=$((10#$extra))
+                ((midi_division > 0 && midi_division < 32768)) || { chart_error 'Invalid MIDI division'; return 1; }
+                continue ;;
+            '# midi_tempo='*)
+                extra=${line#'# midi_tempo='}
+                [[ $extra =~ ^([0-9]{1,10}),([0-9]{1,8})$ ]] || { chart_error 'Invalid MIDI tempo'; return 1; }
+                beat=$((10#${BASH_REMATCH[1]})) bpm=$((10#${BASH_REMATCH[2]}))
+                ((bpm > 0 && bpm <= 16777215)) || { chart_error 'Invalid MIDI tempo duration'; return 1; }
+                if ((${#midi_ticks[@]} == 0)); then
+                    ((beat == 0)) || { chart_error 'MIDI tempo map must start at tick 0'; return 1; }
+                else
+                    ((beat > midi_ticks[${#midi_ticks[@]}-1])) || { chart_error 'MIDI tempo ticks must increase'; return 1; }
+                fi
+                midi_ticks+=( "$beat" ); midi_tempos+=( "$bpm" ); continue ;;
             '# rhythm_grid='*)
                 chart_grid=${line#'# rhythm_grid='}
                 case $chart_grid in 1|1/2|1/4) ;; *) chart_error "$file:$number: invalid rhythm_grid"; return 1 ;; esac
@@ -54,6 +77,11 @@ load_chart() {
         [[ -n $beat ]] || continue
         tempo_beats+=( "$((beat - 1))" ); tempo_bpms+=( "$bpm" )
     done < <(for beat in "${!events[@]}"; do printf '%s,%s\n' "$beat" "${events[$beat]}"; done | sort -t, -k1,1n)
+    if ((midi_division || ${#midi_ticks[@]})); then
+        ((midi_division > 0 && ${#midi_ticks[@]} > 0 && ${#events[@]} == 0)) || {
+            chart_error 'Incomplete or mixed MIDI tempo map'; return 1;
+        }
+    fi
     build_timing
     sort_notes || return 1
     base=$(cd -- "$(dirname -- "$file")" && pwd) || return 1
@@ -131,8 +159,14 @@ save_chart() {
     temp=$(mktemp -- "${chart_path}.tmp.XXXXXX") || return 1
     if ! {
         printf '# Four Keys chart v1\n# audio=%s\n# offset_ms=%d\n# bpm=%d\n' "$chart_audio" "$chart_offset" "$chart_bpm"
+        ((${chart_midi_preroll_ms:-0} == 0)) || printf '# midi_preroll_ms=%d\n' "$chart_midi_preroll_ms"
         [[ -z ${chart_grid:-} ]] || printf '# rhythm_grid=%s\n' "$chart_grid"
-        for ((i=1; i<${#tempo_beats[@]}; i++)); do printf '# tempo=%d,%d\n' "$((tempo_beats[i] + 1))" "${tempo_bpms[i]}"; done
+        if ((${midi_division:-0})); then
+            printf '# midi_division=%d\n' "$midi_division"
+            for ((i=0; i<${#midi_ticks[@]}; i++)); do printf '# midi_tempo=%d,%d\n' "${midi_ticks[i]}" "${midi_tempos[i]}"; done
+        else
+            for ((i=1; i<${#tempo_beats[@]}; i++)); do printf '# tempo=%d,%d\n' "$((tempo_beats[i] + 1))" "${tempo_bpms[i]}"; done
+        fi
         for ((i=0; i<total; i++)); do
             printf '%d,%d' "${note_times[i]}" "${note_lanes[i]}"
             if (( ${note_ends[i]:-${note_times[i]}} > note_times[i] )); then printf ',%d' "${note_ends[i]}"; fi
@@ -143,6 +177,7 @@ save_chart() {
 }
 
 start_audio() {
+    local preroll_ms=${1:-0}
     command -v mpv >/dev/null || { chart_error 'Music requires mpv. Install it with your package manager (e.g. sudo apt install mpv).'; return 1; }
     command -v python3 >/dev/null || { chart_error 'Music requires python3.'; return 1; }
     [[ -f $audio_path ]] || { chart_error "Audio not found: $audio_path"; return 1; }
@@ -152,7 +187,7 @@ start_audio() {
             rendered_audio=$(bash "$GAME_ROOT/tools/midi_import.sh" "$audio_path" --render-only) || return 1
             audio_path=$rendered_audio ;;
     esac
-    coproc MUSIC { python3 "$GAME_ROOT/tools/mpv_bridge.py" "$audio_path"; }
+    coproc MUSIC { python3 "$GAME_ROOT/tools/mpv_bridge.py" "$audio_path" "$preroll_ms"; }
     audio_pid=$MUSIC_PID audio_in=${MUSIC[1]} audio_out=${MUSIC[0]}
     audio_eof=0 audio_duration_ms=0
     local response

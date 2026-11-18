@@ -42,11 +42,11 @@ def hold_fixture():
     return b'MThd' + struct.pack('>IHHH',6,1,2,480) + chunk(tempo) + chunk(notes)
 
 
-def grid_fixture():
+def grid_fixture(first_tick=1920):
     track = b'\x00\xff\x51\x03\x07\xa1\x20'
     for i in range(16):
         pitch = 60+i%4
-        track += vlq(1920 if i==0 else 60)+bytes((0x90,pitch,100))
+        track += vlq(first_tick if i==0 else 60)+bytes((0x90,pitch,100))
         track += vlq(60)+bytes((0x80,pitch,0))
     track += b'\x00\xff\x2f\x00'
     return b'MThd'+struct.pack('>IHHH',6,0,1,480)+b'MTrk'+struct.pack('>I',len(track))+track
@@ -125,6 +125,7 @@ class MidiTests(unittest.TestCase):
         self.assertEqual(info['tracks'][1]['channels'], {'0': 3})
         text, notes = self.chart('--track', '1')
         self.assertEqual(notes, [(2000, 0), (2500, 2)])
+        self.assertNotIn('# midi_preroll_ms=', text)
         self.assertIn('# tempo=5,240', text)
         self.assertIn('# audio=music with spaces.mid', text)
 
@@ -133,6 +134,75 @@ class MidiTests(unittest.TestCase):
         result = self.run_import('--analyze')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['tracks'][1]['name'], 'L"\\\n')
+
+    def test_fractional_tempo_map_timing_and_editor_roundtrip(self):
+        # Change at beat 4 + 1/480, with a non-integer BPM, inside a hold.
+        self.source.write_bytes(hold_fixture().replace(vlq(1920), vlq(1921), 1)
+                                .replace(b'\x03\xd0\x90', (444444).to_bytes(3, 'big'), 1))
+        text, notes = self.chart('--generate-only', '--track', '1', '--holds', '--grid', '1/4', '--seed', '42', random=True)
+        self.assertIn('# midi_division=480', text)
+        self.assertIn('# midi_tempo=1921,444444', text)
+        self.assertTrue(any(len(note) == 3 for note in notes))
+        from fractions import Fraction
+        def expected(tick):
+            return round(Fraction(min(tick, 1921) * 500000 + max(0, tick - 1921) * 444444, 480000))
+        # Both heads and tails stay on the original MIDI grid across the change.
+        grid_times = {expected(tick) for tick in range(0, 22081, 120)}
+        self.assertTrue(all(note[0] in grid_times and (len(note) == 2 or note[2] in grid_times) for note in notes))
+        output = self.directory / 'chart.csv'
+        code = '''source ./editor.sh
+load_chart "$1" || exit 1
+for ((ticks=0; ticks<=40000000; ticks+=250000)); do
+    beat_to_ms "$ticks"; printf '%d ' "$mapped_ms"
+    ms_to_beat "$mapped_ms"; [[ $beat_ticks == "$ticks" ]] || exit 2
+done
+cursor=2000; dirty=0
+if change_tempo 4 120; then exit 3; fi
+save_chart || exit 4
+load_chart "$1" || exit 5
+[[ ${midi_ticks[*]} == '0 1921' && ${midi_tempos[*]} == '500000 444444' ]] || exit 6
+'''
+        result = subprocess.run(['bash', '-c', code, 'test', str(output)], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(list(map(int, result.stdout.split())), [expected(tick) for tick in range(0, 19201, 120)])
+        self.assertIn('# midi_tempo=1921,444444', output.read_text())
+
+    def test_xterfusion_imports_all_difficulties(self):
+        source = ROOT / 'songs/xterfusion.mid'
+        if not source.exists(): self.skipTest('User MIDI is not present')
+        self.source = source
+        for grid in ('1', '1/2', '1/4'):
+            text, notes = self.chart('--generate-only', '--seed', '42', '--grid', grid, '--holds', random=True)
+            self.assertIn('# midi_division=96', text)
+            self.assertIn('# midi_tempo=30911,', text)
+            self.assertGreater(len(notes), 100)
+
+    def test_invalid_precise_tempo_headers(self):
+        for headers in ('# midi_division=0', '# midi_division=32768',
+                        '# midi_tempo=0,500000', '# midi_division=96',
+                        '# midi_division=96\n# midi_tempo=1,500000',
+                        '# midi_division=96\n# midi_tempo=0,0',
+                        '# midi_division=96\n# midi_tempo=0,16777216',
+                        '# midi_division=96\n# midi_tempo=0,500000\n# midi_tempo=0,400000',
+                        '# midi_division=96\n# midi_tempo=0,500000\n# tempo=2,120'):
+            path = self.directory / 'invalid.csv'
+            path.write_text(headers + '\n2000,0\n')
+            result = subprocess.run(['bash', '-c', 'source ./game.sh; load_chart "$1"', 'test', str(path)],
+                                    cwd=ROOT, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0, headers)
+
+    def test_precise_tempo_half_millisecond_rounding(self):
+        path = self.directory / 'rounding.csv'
+        path.write_text('# midi_division=96\n# midi_tempo=0,234375\n# midi_tempo=30911,461538\n2812,0\n')
+        code = '''source ./game.sh
+load_chart "$1" || exit 1
+beat_to_ms 12000000; [[ $mapped_ms == 2812 ]] || exit 2
+ms_to_beat 2812; [[ $beat_ticks == 12000000 ]] || exit 3
+[[ ${note_colors[0]} == 97 ]] || exit 4
+beat_to_ms 4000000; [[ $mapped_ms == 938 ]] || exit 5
+'''
+        result = subprocess.run(['bash', '-c', code, 'test', str(path)], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_grids_and_offbeats(self):
         for offbeat in (False, True):
@@ -147,6 +217,25 @@ class MidiTests(unittest.TestCase):
                 self.assertEqual(notes[0][0], first)
                 self.assertTrue(all(n[0] % gap == 0 for n in notes))
                 self.assertTrue(all(b[0]-a[0] == gap for a,b in zip(notes,notes[1:])))
+
+    def test_intro_notes_are_kept_on_every_grid(self):
+        self.source.write_bytes(grid_fixture(first_tick=0))
+        for grid, gap in [('1', 500), ('1/2', 250), ('1/4', 125)]:
+            with self.subTest(grid=grid):
+                imported_text, imported = self.chart('--grid', grid)
+                randomized_text, randomized = self.chart('--grid', grid, '--seed', '42',
+                                                          '--generate-only', random=True)
+                expected = list(range(0, 2000, gap))
+                self.assertEqual([note[0] for note in imported], expected)
+                self.assertEqual([note[0] for note in randomized], expected)
+                self.assertIn('# midi_preroll_ms=2000\n', imported_text)
+                self.assertIn('# midi_preroll_ms=2000\n', randomized_text)
+
+        output = self.directory / 'chart.csv'
+        saved = subprocess.run(['bash', '-c', 'source ./game.sh; load_chart "$1" && save_chart',
+                                'test', str(output)], cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(saved.returncode, 0, saved.stderr)
+        self.assertIn('# midi_preroll_ms=2000\n', output.read_text())
 
     def test_hold_durations_grid_and_missing_note_offs(self):
         self.source.write_bytes(hold_fixture())
@@ -177,7 +266,7 @@ class MidiTests(unittest.TestCase):
             text, notes = self.chart('--seed', seed, '--holds', '--generate-only', random=True)
             if first is None: first = text
             lanes_by_seed.append([n[1] for n in notes])
-            self.assertIn('# random_mode=balanced-holds-shell-v5', text)
+            self.assertIn('# random_mode=balanced-holds-shell-v8', text)
             self.assertIn('# hold_count=2', text)
             times = [(n[0], n[2] if len(n)==3 else n[0]) for n in notes]
             if timing is None: timing = times
@@ -229,27 +318,22 @@ class MidiTests(unittest.TestCase):
                         fixture().replace(b'\x07\xa1\x20',b'\x00\x00\x00',1)]:
             self.source.write_bytes(content)
             self.assertNotEqual(self.run_import('--analyze').returncode, 0, content[:20])
-        # Valid MIDI but a tempo event outside integer beats is unrepresentable in CSV v1.
-        self.source.write_bytes(fixture().replace(vlq(1920),vlq(1921),1))
-        output = self.directory / 'invalid.csv'
-        result = self.run_import('--output', output)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse(output.exists())
 
     def isolated_project(self):
         root = self.directory / 'project'
         shutil.copytree(ROOT / 'tools', root / 'tools', ignore=shutil.ignore_patterns('__pycache__'))
+        shutil.copytree(ROOT / 'lib', root / 'lib')
         shutil.copy(ROOT / 'random-play.sh', root / 'random-play.sh')
         return root
 
     def test_random_launches_game_and_default_path(self):
         root = self.isolated_project()
         (root / 'game.sh').write_text('printf "%s\\n" "$@" > "$(dirname -- "$0")/arguments"\nexit 7\n')
-        result = self.run_import('--seed','8','--silent','--fps','30','--offset','50', random=True, root=root)
+        result = self.run_import('--seed','8','--silent','--fps','30','--offset','50','--speed','2.5', random=True, root=root)
         self.assertEqual(result.returncode, 7, result.stderr)
         args = (root / 'arguments').read_text().splitlines()
-        self.assertEqual(args[1:], ['--fps','30','--offset','50','--silent'])
-        self.assertIn('balanced-shell-v5', Path(args[0]).name)
+        self.assertEqual(args[1:], ['--fps','30','--offset','50','--speed','2.5','--silent'])
+        self.assertIn('balanced-shell-v8', Path(args[0]).name)
         self.assertTrue(Path(args[0]).is_file())
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'ffmpeg/ffprobe not installed')
@@ -332,7 +416,7 @@ class MidiTests(unittest.TestCase):
         self.assertTrue(all(b[0]-a[0] >= 300 for a,b in zip(notes,notes[1:])))
         self.assertLess(max(b[0]-a[0] for a,b in zip(notes,notes[1:])), 5000)
         _, baseline = self.chart('--track', '9', '--support-track', '12', '--seed', '42', '--generate-only', random=True)
-        self.assertEqual(len(baseline), 166)
+        self.assertEqual(len(baseline), 168)
         self.assertTrue({n[0] for n in baseline} <= {n[0] for n in notes})
         _, other_seed = self.chart('--seed', '99', '--holds', '--generate-only', random=True)
         self.assertEqual([(n[0], n[2:]) for n in notes], [(n[0], n[2:]) for n in other_seed])
@@ -340,7 +424,7 @@ class MidiTests(unittest.TestCase):
         self.assertEqual([n[0] for n in notes], [n[0] for n in taps])
         self.source = swan
         text, swan_notes = self.chart('--seed', '42', '--holds', '--generate-only', random=True)
-        self.assertEqual(len(swan_notes), 282)
+        self.assertEqual(len(swan_notes), 285)
         self.assertNotIn('# density_fill_track=', text)
         self.assertLess(abs(len(notes)/164.705 - len(swan_notes)/160.541), .05)
 

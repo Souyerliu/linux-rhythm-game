@@ -84,16 +84,13 @@ function fill_easy_piano(    n,t,tick,ms,i,k,size,target,left,right,distance,bes
     fill_track=-1; fill_added=0
     if(!random_mode || subdivisions!=1 || ENVIRON["MIDI_TRACK"]!="" || ENVIRON["MIDI_SUPPORT"]!="") return
     if(total*1000 >= milliseconds(end_tick)*1.5) return
-    for(n=1;n<=note_count;n++) if(nt[n]!=track && nt[n]!=support && nc[n]!=9 && tolower(names[nt[n]]) ~ /piano/ && ticks[n]%division==0) {
-        ms=milliseconds(ticks[n])
-        if(ms>=2000) piano_counts[nt[n]]++
-    }
+    for(n=1;n<=note_count;n++) if(nt[n]!=track && nt[n]!=support && nc[n]!=9 && tolower(names[nt[n]]) ~ /piano/ && ticks[n]%division==0) piano_counts[nt[n]]++
     for(t=0;t<track_count;t++) if(piano_counts[t] && (fill_track<0 || piano_counts[t]>piano_counts[fill_track])) fill_track=t
     if(fill_track<0) return
     for(i=1;i<=total;i++) fill_kept[times[i]]=1
     for(n=1;n<=note_count;n++) if(nt[n]==fill_track && nc[n]!=9 && ticks[n]%division==0) {
         ms=milliseconds(ticks[n]); k=piano_notes[ms]
-        if(ms>=2000 && (!k || pitches[n]>pitches[k])) piano_notes[ms]=n
+        if(!k || pitches[n]>pitches[k]) piano_notes[ms]=n
     }
     for(ms in fill_kept) fill_union[ms]=1
     for(ms in piano_notes) fill_union[ms]=1
@@ -108,7 +105,7 @@ function fill_easy_piano(    n,t,tick,ms,i,k,size,target,left,right,distance,bes
             if(ms in fill_kept) right=ms
             fill_right[i]=right
         }
-        left=2000-minimum_gap; best=0; best_distance=-1
+        left=-minimum_gap; best=0; best_distance=-1
         for(i=1;i<=size;i++) {
             ms=fill_times[i]
             if(ms in fill_kept) { left=ms; continue }
@@ -144,7 +141,7 @@ function balance_phrases(    i,n,t,ms,b,buckets,sum,squares,mean,variance,count,
         t=nt[n]
         if(nc[n]==9 || (t!=track && t!=support && tolower(names[t]) !~ /piano|vocal|guitar/)) continue
         if(ticks[n]*subdivisions%division) continue
-        ms=milliseconds(ticks[n]); if(ms<2000) continue
+        ms=milliseconds(ticks[n])
         phrase_union[ms]=1; phrase_source_tracks[t]=1
     }
     for(ms in phrase_union) phrase_times[++size]=ms+0
@@ -165,7 +162,7 @@ function balance_phrases(    i,n,t,ms,b,buckets,sum,squares,mean,variance,count,
                     if(ms in phrase_kept) right=ms
                     phrase_right[i]=right
                 }
-                left=max(2000,b*4000); best=0; best_score=-1
+                left=b*4000; best=0; best_score=-1
                 for(i=1;i<=size;i++) {
                     ms=phrase_times[i]
                     if(int(ms/4000)!=b) continue
@@ -190,7 +187,7 @@ function balance_phrases(    i,n,t,ms,b,buckets,sum,squares,mean,variance,count,
             if(ms in phrase_kept) right=ms
             phrase_right[i]=right
         }
-        left=2000-minimum_gap; best=0; best_score=-1
+        left=-minimum_gap; best=0; best_score=-1
         for(i=1;i<=size;i++) {
             ms=phrase_times[i]; b=int(ms/4000)
             if(ms in phrase_kept) { left=ms; continue }
@@ -250,6 +247,7 @@ END {
                 key=t SUBSEP channel SUBSEP pitch
                 if(kind==144 && velocity) {
                     n=++note_count; nt[n]=t; ticks[n]=tick; pitches[n]=pitch; velocities[n]=velocity; nc[n]=channel; ends[n]=tick
+                    if(n==1 || tick<first_note_tick) first_note_tick=tick
                     queue[key,++tail[key]]=n
                     counts[t]++; channels[t,channel]++
                     if(channel!=9) melodic[t]++
@@ -309,7 +307,7 @@ END {
     last_lane=-1
     for(i=1;i<=selected_count;i++) {
         n=chosen[selected_ticks[i]]; ms=milliseconds(ticks[n])
-        if(ms<2000 || (total && ms-times[total]<minimum_gap)) continue
+        if(total && ms-times[total]<minimum_gap) continue
         lane=pitch_lane[pitches[n]]
         if(lane==last_lane) { repeats++; if(repeats>=2) { lane=(lane+1)%4; repeats=0 } }
         else repeats=0
@@ -356,11 +354,20 @@ END {
     print "# Four Keys chart v1"
     print "# audio=" ENVIRON["MIDI_AUDIO"]
     print "# offset_ms=0"
+    if(note_count && milliseconds(first_note_tick)==0) print "# midi_preroll_ms=2000"
     for(i=1;i<=tempo_count;i++) {
         tick=tempo_ticks[i]; bpm=60000000/tempos[tick]; integer=rounded(bpm)
-        if(tick%division || (bpm-integer>0.001 || integer-bpm>0.001) || integer<20 || integer>400)
-            fail("Tempo map needs fractional beats/BPM, unsupported by CSV v1")
-        if(i==1) printf "# bpm=%d\n",integer
+        if(tick%division || tempos[tick]*integer!=60000000 || integer<20 || integer>400) precise_tempo=1
+    }
+    if(precise_tempo) {
+        # Preserve the MIDI timebase and microseconds/quarter, not rounded BPM.
+        printf "# bpm=%d\n",max(20,min(400,rounded(60000000/tempos[0])))
+        printf "# midi_division=%d\n",division
+    }
+    for(i=1;i<=tempo_count;i++) {
+        tick=tempo_ticks[i]; bpm=60000000/tempos[tick]; integer=rounded(bpm)
+        if(precise_tempo) printf "# midi_tempo=%.0f,%d\n",tick,tempos[tick]
+        else if(i==1) printf "# bpm=%d\n",integer
         else printf "# tempo=%d,%d\n",tick/division+1,integer
     }
     if(random_mode) {

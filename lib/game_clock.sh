@@ -21,7 +21,7 @@ game_clock_step() {
         game_clock_error_us=$((game_clock_error_us - correction))
         game_clock_local=$stamp
     fi
-    elapsed=$((game_clock_audio_us / 1000 - ${chart_offset:-0}))
+    elapsed=$((game_clock_audio_us / 1000 - ${lead_in_ms:-0} - ${chart_offset:-0}))
 }
 
 game_clock_sample() {

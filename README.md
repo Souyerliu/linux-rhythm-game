@@ -25,6 +25,7 @@ sudo apt install mpv python3 fluidsynth timgm6mb-soundfont ffmpeg
 | W / S 或 ↑ / ↓ | 选择歌曲 |
 | A / D 或 ← / → | 选择难度 |
 | H | 开关长条 |
+| - / +（或 =） | 降低 / 提高谱面流速 |
 | Enter | 开始游戏 |
 | P | 无音乐练习 |
 | Q | 退出 |
@@ -36,6 +37,7 @@ sudo apt install mpv python3 fluidsynth timgm6mb-soundfont ffmpeg
 - **D / F / J / K** 对应从左到右四条轨道，音符到达底部判定线时按键。
 - 单点按一次；长条在**头部和尾部到达时各按一次同一个键**，不用一直按住。
 - 按键越准，得分越高；漏掉音符会记 Miss 并中断连击。
+- 选歌界面可用 **- / +** 调节流速，每次 0.1×，范围 **0.5×～5.0×**，默认 **2.0×**。`=` 也可加速。默认流速下，音符从顶部到判定线需要 1 秒。流速只影响谱面的显示。选歌设置会用于随后启动的歌曲，游玩过程中流速固定。
 - 游戏中按 **Q / Esc** 退出。结算后按任意键返回选歌。
 
 同一首 MIDI、同一难度保存一个最高分，不区分随机种子和长条开关。**完整打完才更新纪录**，破纪录时显示 `NEW BEST!`；中途退出不保存。本地记录位于 `.local/scores/`。
@@ -44,7 +46,7 @@ sudo apt install mpv python3 fluidsynth timgm6mb-soundfont ffmpeg
 
 ```bash
 # 无音乐练习
-./game.sh --practice
+./game.sh --practice --speed 2
 
 # 指定歌曲、难度和种子，生成谱面后直接游玩
 ./random-play.sh 'songs/Swan_song_–_Void.mid' --seed 42 --grid 1/2 --holds
@@ -55,4 +57,10 @@ sudo apt install mpv python3 fluidsynth timgm6mb-soundfont ffmpeg
 
 `--grid` 可选 `1`、`1/2`、`1/4`；`--holds` 启用长条。
 
-自动生成的 `1/2`、`1/4` 谱面会检查分段密度：分布明显失衡时，从钢琴、人声、吉他和贝斯的真实网格落点补充稀疏段，并适度抽稀过密段；没有音符的休止段保持留白。手动指定音轨时保留原来的选音规则。生成器版本为 `v5`，新生成的文件与旧谱面分开保存；已有 CSV 的分布不会自动改变。
+自动生成的 `1/2`、`1/4` 谱面会检查分段密度：分布明显失衡时，从钢琴、人声、吉他和贝斯的真实网格落点补充稀疏段，并适度抽稀过密段；没有音符的休止段保持留白。手动指定音轨时跳过密度调整。
+
+生成器 `v8` 会为在 0 毫秒有起音的 MIDI 自动加入 2 秒开场空档。谱面通过 `# midi_preroll_ms=2000` 保存这段空档，播放时把它同时加到音频和谱面时间线上。空档长度独立于流速，CSV 中的音符时间仍以原曲开头为基准。新生成的谱面与旧 CSV 分开保存。
+
+`game.sh`、`menu.sh` 和 `random-play.sh` 均支持 `--speed 2` 指定初始流速（最多一位小数）。
+
+支持 MIDI 中途变速，包括非整拍变速和小数 BPM。导入器按原始 tick 和每拍微秒数计算普通音符、长条头尾的时间；需要精确速度图时，CSV 使用 `# midi_division=PPQN` 和 `# midi_tempo=tick,微秒每拍` 保存。编辑器可编辑音符并保留此速度图，但修改这类谱面的 BPM 需在 MIDI 源文件中完成后重新导入。谱面流速倍率仍独立于音乐速度。

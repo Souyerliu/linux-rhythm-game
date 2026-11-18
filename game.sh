@@ -5,6 +5,7 @@ source "$GAME_ROOT/lib/chart.sh"
 source "$GAME_ROOT/lib/terminal.sh"
 source "$GAME_ROOT/lib/game_clock.sh"
 source "$GAME_ROOT/lib/scores.sh"
+source "$GAME_ROOT/lib/scroll.sh"
 
 if (( BASH_VERSINFO[0] < 5 )); then
     printf 'Please run this game with Bash 5 or newer.\n' >&2
@@ -19,6 +20,7 @@ clock_ms() {
 make_chart() {
     local i lane
     note_times=() note_lanes=() note_ends=() note_states=()
+    midi_division=0 midi_ticks=() midi_tempos=()
     chart_bpm=120 tempo_beats=(0) tempo_bpms=(120); build_timing
     for ((i=0; i<48; i++)); do
         lane=$(( (i / 8 + i) % 4 ))
@@ -151,17 +153,22 @@ poll_game_audio() {
 
 render() {
     local row lane i remaining y tail ending code glyph frame='' line cell body_cell key height=${playfield_rows:-16}
+    if [[ -z ${scroll_window_ms:-} ]]; then
+        local scroll_speed=$SCROLL_DEFAULT_SPEED scroll_window_ms scroll_label
+        update_scroll_speed
+    fi
+    local window=$scroll_window_ms
     local -a cells=() occupied_rows=() cell_priority=()
     lower_bound_visible "$((elapsed - 140))"
-    for ((i=note_index; i<total && note_times[i]<=elapsed+2000; i++)); do
+    for ((i=note_index; i<total && note_times[i]<=elapsed+window; i++)); do
         [[ ${note_states[i]} == pending || ${note_states[i]} == holding ]] || continue
         remaining=$((note_times[i] - elapsed))
         ending=${note_ends[i]:-${note_times[i]}}
         code=${note_colors[i]:-}
         if [[ -z $code ]]; then note_color "${note_times[i]}"; code=$color_code; fi
         if ((ending > note_times[i] && ending >= elapsed - 140)); then
-            y=$height; ((remaining > 0)) && y=$((height - remaining * height / 2000))
-            tail=$((height - (ending - elapsed) * height / 2000))
+            y=$height; ((remaining > 0)) && y=$((height - remaining * height / window))
+            tail=$((height - (ending - elapsed) * height / window))
             ((tail < 0)) && tail=0; ((tail > height)) && tail=$height
             body_cell=$'\e['"$code"'m  |  '$'\e[0m'
             for ((row=tail; row<=y; row++)); do
@@ -170,19 +177,19 @@ render() {
                     cells[key]=$body_cell; cell_priority[key]=1; occupied_rows[row]=1
                 fi
             done
-            if ((ending <= elapsed + 2000)); then paint_game_cell "$tail" "${note_lanes[i]}" '[---]' "$code" 2; fi
+            if ((ending <= elapsed + window)); then paint_game_cell "$tail" "${note_lanes[i]}" '[---]' "$code" 2; fi
             glyph='[===]'
             if [[ ${note_states[i]} == holding ]]; then glyph='[HLD]'; ((ending <= elapsed)) && glyph='[---]'; fi
             paint_game_cell "$y" "${note_lanes[i]}" "$glyph" "$code" 3
-        elif ((remaining >= -140 && remaining <= 2000)); then
+        elif ((remaining >= -140 && remaining <= window)); then
             y=$height
-            ((remaining > 0)) && y=$((height - remaining * height / 2000))
+            ((remaining > 0)) && y=$((height - remaining * height / window))
             paint_game_cell "$y" "${note_lanes[i]}" '[===]' "$code" 3
         fi
     done
     local title=${mode_label:-PRACTICE}
     [[ -z ${score_grid:-} ]] || title+=" | GRID $score_grid | HIGH $best_score"
-    printf -v frame '  FOUR KEYS - %s\n  Beat:white\t Half:cyan\t Quarter:yellow\t Other:purple\n  SCORE %06d     COMBO %03d     BEST %03d\n\n' "$title" "$score" "$combo" "$max_combo"
+    printf -v frame '  FOUR KEYS - %s\n  Beat:white\t Half:cyan\t Quarter:yellow\t Other:purple\n  SCORE %06d  COMBO %03d  BEST %03d  SPEED %sx\n\n' "$title" "$score" "$combo" "$max_combo" "$scroll_label"
     frame+='          +-----+-----+-----+-----+'
     frame+=$'\n'
     for ((row=0; row<=height; row++)); do
@@ -238,16 +245,18 @@ main() {
         return $?
     fi
     local file='' audio_override='' offset_override='' silent=0
-    local render_fps=60
+    local render_fps=60 scroll_speed=$SCROLL_DEFAULT_SPEED scroll_window_ms scroll_label
+    update_scroll_speed
     while (($#)); do
     case $1 in
         -h|--help)
-            printf 'Usage: ./game.sh [--menu | --practice | chart.csv] [--audio FILE] [--offset MS] [--fps 15-120] [--silent]\nNo arguments: song and difficulty menu. --practice: built-in practice.\nDefault: 60 FPS; playfield expands to terminal height at startup.\nMusic and high scores require python3; music also requires mpv.\nD F J K: hit; Q / Esc: quit. Positive offset delays notes.\n'
+            printf 'Usage: ./game.sh [--menu | --practice | chart.csv] [--audio FILE] [--offset MS] [--fps 15-120] [--speed 0.5-5.0] [--silent]\nNo arguments: song and difficulty menu. --practice: built-in practice.\nDefault: 60 FPS; playfield expands to terminal height at startup.\nMusic and high scores require python3; music also requires mpv.\nD F J K: hit; Q / Esc: quit. Scroll speed is set before play (default %sx). Positive offset delays notes.\n' "$scroll_label"
             return 0 ;;
-        --audio|--offset|--fps)
+        --audio|--offset|--fps|--speed)
             (($# >= 2)) || { chart_error "Missing value for $1"; return 1; }
             case $1 in
                 --audio) audio_override=$2 ;;
+                --speed) set_scroll_speed "$2" || return 1 ;;
                 --offset) offset_override=$2 ;;
                 --fps)
                     [[ $2 =~ ^[0-9]{1,3}$ ]] || { chart_error 'FPS must be an integer from 15 to 120'; return 1; }
@@ -293,18 +302,31 @@ main() {
     # row so the final newline never scrolls the whole screen.
     playfield_rows=$((rows - 12))
     score=0 combo=0 max_combo=0 perfect=0 great=0 good=0 miss=0
-    elapsed=0 feedback='' feedback_until=0 expire_cursor=0 hit_errors=()
+    local lead_in_ms=0
+    if [[ -n $file ]]; then
+        lead_in_ms=$chart_midi_preroll_ms
+        if ((lead_in_ms == 0)); then
+            case ${chart_audio,,} in
+                *.mid|*.midi)
+                    # Legacy MIDI charts can still need a short approach.
+                    lead_in_ms=$((scroll_window_ms - note_times[0] - chart_offset))
+                    ((lead_in_ms > 0)) || lead_in_ms=0 ;;
+            esac
+        fi
+    fi
+    elapsed=$((-lead_in_ms - chart_offset)) feedback='' feedback_until=0 expire_cursor=0 hit_errors=()
     saved_stty=$(stty -g)
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
     if [[ -n $audio_path ]]; then
-        start_audio || return 1
-        extend_playback_end "$audio_duration_ms"
+        start_audio "$lead_in_ms" || return 1
+        extend_playback_end "$((audio_duration_ms - lead_in_ms))"
     fi
     stty -echo -icanon min 0 time 0 -ixon
     printf '\e[?1049h\e[?25l\e[2J'
-    # Prepare input and the first screen before releasing the paused player.
+    # Start the audio clock with the approach. The player outputs the lead-in
+    # silence and the song as one continuous stream.
     render
     if [[ -n ${audio_pid:-} ]]; then audio_command play || return 1; fi
     local start_ms next_frame=0 key quit=0 next_sync=0 runtime sync_pending=0 sync_requested_ms=0 sync_response_buffer='' wait_ms input_timeout
@@ -326,10 +348,10 @@ main() {
         if [[ -n ${audio_pid:-} ]]; then
             game_clock_step "$now_ms"
         else
-            elapsed=$((runtime - chart_offset))
+            elapsed=$((runtime - lead_in_ms - chart_offset))
         fi
         # Finish even if the song ends before the last note.
-        if [[ -n ${audio_pid:-} ]] && ((runtime > end_ms + chart_offset + 5000 && !audio_eof)); then
+        if [[ -n ${audio_pid:-} ]] && ((runtime > end_ms + lead_in_ms + chart_offset + 5000 && !audio_eof)); then
             chart_error 'Audio stopped advancing before the chart ended.'
             return 1
         fi
@@ -350,7 +372,7 @@ main() {
             # the frame rather than the earlier input-poll timestamp.
             clock_ms
             if [[ -n ${audio_pid:-} ]]; then game_clock_step "$now_ms"
-            else elapsed=$((now_ms - start_ms - chart_offset)); fi
+            else elapsed=$((now_ms - start_ms - lead_in_ms - chart_offset)); fi
             render
             clock_ms
             advance_frame_deadline "$((now_ms - start_ms))" "$render_fps"
